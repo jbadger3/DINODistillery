@@ -1,0 +1,87 @@
+# Teacher and Student Configurations
+student:
+  model: ""  # Model architecture see student registry files for options
+  pretrained: true         # Use pretrained weights
+  out_feature_indexes: []  # List of layer indexes to extract features from
+teacher:
+  model: "convnext_base"  # Model architecture from backbone_registry.py
+  out_feature_indexes: []  # List of layer indexes to extract features from
+
+# Training Configuration
+training:
+  max_epochs: 100             # Feature distillation: 50-150 epochs (typically faster than KD-only)
+  batch_size: 128             # Adjust based on GPU memory (64-256 typical)
+  num_workers: 4
+  accelerator: "gpu"          # gpu, cpu, tpu
+  devices: 1                  # Number of devices to use
+  precision: "16-mixed"       # "32", "16-mixed", "bf16-mixed", "64", "16-true", "bf16-true", "32-true"
+                              # "16-mixed" and "bf16-mixed" use automatic mixed precision (recommended)
+                              # "32" is full precision (default), "64" is double precision
+  
+  # Optimizer Configuration
+  optimizer:
+    name: "adamw"             # adamw, adam, sgd
+    lr: 0.0005                # Lower LR for feature distillation (0.0001-0.0005)
+    weight_decay: 0.05        # AdamW typically uses higher weight decay (0.01-0.1)
+    momentum: 0.9             # For SGD
+  
+  # Learning Rate Scheduler
+  scheduler:
+    name: "cosine"            # cosine, step, polynomial, exponential
+    warmup_epochs: 5          # Linear warmup epochs (5-10 typical)
+    min_lr: 1.0e-6            # Minimum learning rate for cosine annealing
+    # Step scheduler parameters (if using step)
+    step_size: 30             # Epochs between LR drops
+    gamma: 0.1                # LR multiplication factor
+
+# Distillation Configuration
+distillation:
+  loss_type: "cosine"         # cosine (recommended for DINOv2), mse, cosine_global, kl_div
+  temperature: 4.0            # Temperature for KL divergence (not used for cosine)
+  alpha: 0.5                  # Weight between distillation and task loss
+                              # For pure feature distillation: 1.0
+                              # For balanced: 0.5
+                              # For task-focused: 0.3
+  # Feature loss weighting
+  feature_weight: 1.0         # Overall weight for feature matching loss
+
+# Data Configuration
+data:
+  dataset: "sa1b"              # Dataset type: "sa1b" for Segment Anything 1B
+  root_dir: "datasets/sa-1b"  # Root directory containing SA-1B-Part-* directories
+  image_size: 224              # Input image size (224, 256, 384, 512, etc.)
+  val_size: 10000              # Number of images in validation set
+  augmentation: true           # Use data augmentation for training
+  
+  # Augmentation settings (if augmentation=true)
+  mixup: 0.0                   # Mixup alpha (0.0 = disabled, 0.2-0.4 typical)
+  cutmix: 0.0                  # CutMix alpha (0.0 = disabled, 1.0 typical)
+  
+  # Optional: limit datasets for testing (null = use all data)
+  train_limit: null            # Limit training images for quick testing
+  val_limit: null              # Limit validation images for quick testing
+
+# Evaluation Configuration
+evaluation:
+  eval_every_n_epochs: 1      # Run evaluation every N epochs
+  metrics:             # accuracy, top5_accuracy, f1, precision, recall
+    - "loss"
+  save_predictions: false     # Save predictions to file
+  prediction_dir: "predictions"
+
+# Early Stopping Configuration
+early_stopping:
+  enabled: true
+  monitor: "val_loss"         # Metric to monitor (val_loss, val_accuracy, etc.)
+  patience: 10                # Number of epochs to wait for improvement
+  mode: "min"                 # min (lower is better) or max (higher is better)
+  min_delta: 0.001            # Minimum change to qualify as improvement
+  verbose: true
+
+# Logging Configuration
+logging:
+  experiment_name: "distillation_experiment"
+  log_dir: "logs"
+  save_top_k: 3               # Save top K checkpoints
+  checkpoint_monitor: "val_loss"  # Metric to use for checkpoint saving
+  checkpoint_mode: "min"      # min or max
