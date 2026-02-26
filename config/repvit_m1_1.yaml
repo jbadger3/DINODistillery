@@ -20,7 +20,8 @@ training:
   # Option 1: Single size (fixed throughout training)
   image_size: 
     0: 224
-    299: 512
+    300: 512
+    350: 768
 
   # Option 2: Progressive sizes - map epoch numbers to image sizes
   # image_size:
