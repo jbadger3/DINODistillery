@@ -16,25 +16,24 @@ from lightning.pytorch.loggers import TensorBoardLogger
 
 from config import load_yaml
 from lightning_module import DistillationLightningModule
+from dataloader import create_sa1b_dataloaders_from_config
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train DINO distillation model')
     parser.add_argument('--config', type=str, required=True,
                        help='Path to configuration file')
-    parser.add_argument('--output-dir', type=str, default='outputs',
-                       help='Directory to save outputs')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
     return parser.parse_args()
 
 
-def setup_callbacks(config: dict, output_dir: str):
+def setup_callbacks(config: dict, experiment_dir: str):
     """Setup training callbacks.
     
     Args:
         config: Configuration dictionary
-        output_dir: Output directory for checkpoints
+        experiment_dir: Experiment directory (outputs/experiment_name/)
         
     Returns:
         List of callbacks
@@ -43,12 +42,15 @@ def setup_callbacks(config: dict, output_dir: str):
     
     # Checkpoint callback
     logging_cfg = config['logging']
+    checkpoint_dir = os.path.join(experiment_dir, 'checkpoints')
     checkpoint_callback = ModelCheckpoint(
-        dirpath=os.path.join(output_dir, 'checkpoints'),
-        filename='{epoch}-{val_loss:.4f}',
+        dirpath=checkpoint_dir,
+        filename='{epoch:03d}-{val_loss:.4f}',
         monitor=logging_cfg['checkpoint_monitor'],
         mode=logging_cfg['checkpoint_mode'],
         save_top_k=logging_cfg['save_top_k'],
+        every_n_epochs=logging_cfg.get('every_n_epochs', 1),
+        save_on_train_epoch_end=logging_cfg.get('save_on_train_epoch_end', False),
         save_last=True,
         verbose=True
     )
@@ -72,37 +74,48 @@ def setup_callbacks(config: dict, output_dir: str):
 def main():
     args = parse_args()
     
-    print(f"Starting training with config: {args.config}")
-    print(f"Output directory: {args.output_dir}")
-    
     # Load configuration
     config = load_yaml(args.config)
     
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Build experiment directory structure (hardcoded outputs/ base)
+    logging_cfg = config['logging']
+    experiment_name = logging_cfg['experiment_name']
+    experiment_dir = os.path.join('outputs', experiment_name)
+    
+    print(f"Starting training with config: {args.config}")
+    print(f"Experiment directory: {experiment_dir}")
+    print(f"  - Checkpoints: {os.path.join(experiment_dir, 'checkpoints')}")
+    print(f"  - Logs: {os.path.join(experiment_dir, 'logs')}")
+    
+    # Create experiment directory structure
+    os.makedirs(experiment_dir, exist_ok=True)
+    os.makedirs(os.path.join(experiment_dir, 'checkpoints'), exist_ok=True)
+    os.makedirs(os.path.join(experiment_dir, 'logs'), exist_ok=True)
     
     # Create lightning module
-    print("Creating distillation module...")
+    print("\nCreating distillation module...")
     model = DistillationLightningModule(config)
     
-    # Setup logger
-    logging_cfg = config['logging']
+    # Setup logger (logs go in experiment_dir/logs/)
     logger = TensorBoardLogger(
-        save_dir=args.output_dir,
-        name=logging_cfg['experiment_name'],
+        save_dir=experiment_dir,
+        name='logs',
         version=None
     )
     
     # Setup callbacks
-    callbacks = setup_callbacks(config, args.output_dir)
+    callbacks = setup_callbacks(config, experiment_dir)
     
     # Create trainer
     training_cfg = config['training']
+    eval_cfg = config.get('evaluation', {})
     trainer = L.Trainer(
         max_epochs=training_cfg['max_epochs'],
+        accumulate_grad_batches=training_cfg.get('accumulate_grad_batches', 1),
         accelerator=training_cfg['accelerator'],
         devices=training_cfg['devices'],
         precision=training_cfg['precision'],
+        check_val_every_n_epoch=eval_cfg.get('eval_every_n_epochs', 1),
         logger=logger,
         callbacks=callbacks,
         log_every_n_steps=10,
@@ -110,12 +123,31 @@ def main():
         enable_model_summary=True
     )
     
-    # TODO: Setup dataloaders
-    print("\nNote: Dataloader setup is not yet implemented.")
-    print("Model creation successful!")
+    # Setup dataloaders
+    print("\nSetting up dataloaders...")
+    train_loader, val_loader = create_sa1b_dataloaders_from_config(config)
+    print(f"Train batches: {len(train_loader):,}")
+    print(f"Val batches: {len(val_loader):,}")
+    print(f"Total train images: {len(train_loader.dataset):,}")
+    print(f"Total val images: {len(val_loader.dataset):,}")
     
-    # Train model (commented until dataloaders are implemented)
-    # trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    # Train model
+    print("\n" + "="*60)
+    print("Starting training...")
+    print("="*60 + "\n")
+    
+    trainer.fit(
+        model, 
+        train_dataloaders=train_loader, 
+        val_dataloaders=val_loader,
+        ckpt_path=args.resume
+    )
+    
+    print("\n" + "="*60)
+    print("Training completed!")
+    print(f"Best checkpoint saved in: {os.path.join(experiment_dir, 'checkpoints')}")
+    print(f"TensorBoard logs in: {os.path.join(experiment_dir, 'logs')}")
+    print("="*60)
 
 
 if __name__ == "__main__":

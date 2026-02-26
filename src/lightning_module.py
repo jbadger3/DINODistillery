@@ -3,13 +3,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
 from typing import Dict, List, Optional, Any
+from torch.utils.data import DataLoader
 import timm
 
-from .teacher import Teacher
-from .dinov3.backbone_registry import VIT_MODELS, VIT_MODELS_QKVB, CONVNEXT_MODELS
-from .dinov3.dino_vit import DINOViT
-from .dinov3.dino_convnext import DINOConvNeXt
-from .students.repvit.repvit_registry import REPVIT_MODELS
+from teacher import Teacher
+from student import Student
+from dinov3.backbone_registry import VIT_MODELS, VIT_MODELS_QKVB, CONVNEXT_MODELS
+from dinov3.dino_vit import DINOViT
+from dinov3.dino_convnext import DINOConvNeXt
+from students.repvit.repvit_registry import REPVIT_MODELS
 import sys
 
 
@@ -119,13 +121,64 @@ def validate_teacher_student_compatibility(
 
 
 def create_teacher_model(config: Dict[str, Any]) -> Teacher:
-    """Create teacher model from config with channel adaptation if needed.
+    """Create teacher model from config.
+    
+    Args:
+        config: Configuration dictionary containing teacher settings
+        
+    Returns:
+        Teacher wrapper with frozen backbone
+    """
+    teacher_cfg = config['teacher']
+    
+    teacher_model_name = teacher_cfg['model']
+    teacher_out_feature_indexes = teacher_cfg.get('out_feature_indexes', None)
+    
+    # Convert empty list to None
+    if teacher_out_feature_indexes is not None and len(teacher_out_feature_indexes) == 0:
+        teacher_out_feature_indexes = None
+    
+    # Get registry information
+    teacher_info = get_model_registry_info(teacher_model_name, is_teacher=True)
+    
+    # Determine model type and create appropriate backbone
+    if teacher_model_name in VIT_MODELS or teacher_model_name in VIT_MODELS_QKVB:
+        # Get the timm model name for ViT models
+        timm_model_name = teacher_info['model_name']
+        
+        # Create DINOViT model (freeze=True by default)
+        backbone = DINOViT(
+            model_name=timm_model_name,
+            pretrained=True,
+            out_feature_indexes=teacher_out_feature_indexes,
+            freeze=True
+        )
+    elif teacher_model_name in CONVNEXT_MODELS:
+        # Create DINOConvNeXt model (freeze=True by default)
+        backbone = DINOConvNeXt(
+            model_name=teacher_model_name,
+            pretrained=True,
+            out_feature_indexes=teacher_out_feature_indexes,
+            freeze=True
+        )
+    else:
+        raise ValueError(f"Teacher model '{teacher_model_name}' not found in registry. "
+                        f"Available models: {list({**VIT_MODELS, **VIT_MODELS_QKVB, **CONVNEXT_MODELS}.keys())}")
+    
+    # Create Teacher wrapper (no adapters - those are on the student now)
+    teacher = Teacher(model=backbone)
+    
+    return teacher
+
+
+def create_student_model(config: Dict[str, Any]) -> Student:
+    """Create student model from config with channel adaptation.
     
     Args:
         config: Configuration dictionary containing teacher and student settings
         
     Returns:
-        Teacher wrapper with backbone and optional channel adapters
+        Student wrapper with backbone and channel adapters
     """
     teacher_cfg = config['teacher']
     student_cfg = config['student']
@@ -156,75 +209,35 @@ def create_teacher_model(config: Dict[str, Any]) -> Teacher:
         teacher_model_name, student_model_name
     )
     
-    # Determine model type and create appropriate backbone
-    if teacher_model_name in VIT_MODELS or teacher_model_name in VIT_MODELS_QKVB:
-        # Get the timm model name for ViT models
-        timm_model_name = teacher_info['model_name']
-        
-        # Create DINOViT model (freeze=True by default)
-        backbone = DINOViT(
-            model_name=timm_model_name,
-            pretrained=True,
-            out_feature_indexes=teacher_out_feature_indexes,
-            freeze=True
-        )
-    elif teacher_model_name in CONVNEXT_MODELS:
-        # Create DINOConvNeXt model (freeze=True by default)
-        backbone = DINOConvNeXt(
-            model_name=teacher_model_name,
-            pretrained=True,
-            out_feature_indexes=teacher_out_feature_indexes,
-            freeze=True
-        )
-    else:
-        raise ValueError(f"Teacher model '{teacher_model_name}' not found in registry. "
-                        f"Available models: {list({**VIT_MODELS, **VIT_MODELS_QKVB, **CONVNEXT_MODELS}.keys())}")
-    
-    # Create Teacher wrapper with channel adapters
-    teacher = Teacher(
-        model=backbone,
-        teacher_channels=[f['channels'] for f in teacher_features],
-        student_channels=[f['channels'] for f in student_features]
-    )
-    
-    return teacher
-
-
-def create_student_model(config: Dict[str, Any]) -> nn.Module:
-    """Create student model from config.
-    
-    Args:
-        config: Configuration dictionary containing student settings
-        
-    Returns:
-        Student model
-    """
-    student_cfg = config['student']
-    model_name = student_cfg['model']
-    pretrained = student_cfg.get('pretrained', False)
-    out_feature_indexes = student_cfg.get('out_feature_indexes', None)
-    
-    # Convert empty list to None
-    if out_feature_indexes is not None and len(out_feature_indexes) == 0:
-        out_feature_indexes = None
-    
     # Find model in registries
-    if model_name not in REPVIT_MODELS:
-        raise ValueError(f"Student model '{model_name}' not found in registry. "
+    if student_model_name not in REPVIT_MODELS:
+        raise ValueError(f"Student model '{student_model_name}' not found in registry. "
                         f"Available models: {list(REPVIT_MODELS.keys())}")
     
-    model_info = REPVIT_MODELS[model_name]
+    model_info = REPVIT_MODELS[student_model_name]
     timm_model_name = model_info['model_name']
+    pretrained = student_cfg.get('pretrained', False)
     
-    # Create model using timm with features_only mode
-    model = timm.create_model(
+    # Create student backbone using timm with features_only mode
+    backbone = timm.create_model(
         timm_model_name, 
         pretrained=pretrained, 
         features_only=True,
-        out_indices=out_feature_indexes if out_feature_indexes else None
+        out_indices=student_out_feature_indexes if student_out_feature_indexes else None
     )
     
-    return model
+    # Get adapter type from config
+    adapter_type = student_cfg.get('adapter_type', 'bottleneck')
+    
+    # Wrap student backbone with channel adapters
+    student = Student(
+        model=backbone,
+        teacher_channels=[f['channels'] for f in teacher_features],
+        student_channels=[f['channels'] for f in student_features],
+        adapter_type=adapter_type
+    )
+    
+    return student
 
 
 class DistillationLightningModule(L.LightningModule):
@@ -251,8 +264,108 @@ class DistillationLightningModule(L.LightningModule):
         
         # Distillation config
         self.temperature = config['distillation'].get('temperature', 4.0)
-        self.alpha = config['distillation'].get('alpha', 0.5)
-        self.loss_type = config['distillation'].get('loss_type', 'kl_div')
+        
+        # Parse loss configuration - support both single and multi-loss
+        self.loss_configs = self._parse_loss_config(config['distillation'])
+        
+        # Stage loss weights (optional)
+        stage_loss_weights = config['distillation'].get('stage_loss_weights', None)
+        if stage_loss_weights and len(stage_loss_weights) > 0:
+            self.stage_loss_weights = torch.tensor(stage_loss_weights, dtype=torch.float32)
+        else:
+            self.stage_loss_weights = None
+        
+        # Progressive image size configuration
+        self.image_size_schedule = self._parse_image_size_config(config['training'].get('image_size', 224))
+    
+    def _parse_loss_config(self, distillation_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Parse loss configuration from distillation config.
+        
+        Args:
+            distillation_config: Distillation section of config
+            
+        Returns:
+            List of loss configurations with normalized weights
+        """
+        losses = distillation_config.get('losses', [])
+        
+        if not losses or len(losses) == 0:
+            raise ValueError("No losses specified in distillation config. "
+                           "Please provide a 'losses' list with at least one loss configuration.")
+        
+        # Normalize weights
+        total_weight = sum(loss['weight'] for loss in losses)
+        normalized_losses = []
+        for loss in losses:
+            normalized_losses.append({
+                'type': loss['type'],
+                'weight': loss['weight'] / total_weight
+            })
+        return normalized_losses
+    
+    def _parse_image_size_config(self, image_size_config):
+        """Parse image size configuration into a schedule.
+        
+        Args:
+            image_size_config: Either an int (fixed size) or dict mapping epochs to sizes
+            
+        Returns:
+            Dict mapping epochs to image sizes, sorted by epoch
+        """
+        if isinstance(image_size_config, dict):
+            # Already a schedule - just sort by epoch
+            return dict(sorted(image_size_config.items()))
+        else:
+            # Single size - no schedule
+            return {0: int(image_size_config)}
+    
+    def _get_current_image_size(self, epoch: int) -> int:
+        """Get the image size for a given epoch.
+        
+        Args:
+            epoch: Current epoch number
+            
+        Returns:
+            Image size to use for this epoch
+        """
+        # Find the largest epoch key that is <= current epoch
+        applicable_epochs = [e for e in self.image_size_schedule.keys() if e <= epoch]
+        if applicable_epochs:
+            epoch_key = max(applicable_epochs)
+            return self.image_size_schedule[epoch_key]
+        else:
+            # Fallback to first size
+            return self.image_size_schedule[min(self.image_size_schedule.keys())]
+    
+    def on_train_epoch_start(self):
+        """Called at the start of each training epoch."""
+        current_epoch = self.current_epoch
+        target_size = self._get_current_image_size(current_epoch)
+        
+        # Check if we need to update image size
+        if current_epoch in self.image_size_schedule and current_epoch > 0:
+            print(f"\n{'='*60}")
+            print(f"Epoch {current_epoch}: Updating image size to {target_size}x{target_size}")
+            print(f"{'='*60}\n")
+            
+            # Update transforms in train dataloader
+            if self.trainer and self.trainer.train_dataloader:
+                train_dataset = self.trainer.train_dataloader.dataset
+                if hasattr(train_dataset, 'image_size'):
+                    train_dataset.image_size = target_size
+                    # Recreate transform with new size
+                    train_dataset.transform = train_dataset._create_transform(target_size)
+                
+                # Update validation dataloader as well
+                if self.trainer.val_dataloaders:
+                    val_dataloaders = self.trainer.val_dataloaders
+                    if isinstance(val_dataloaders, DataLoader):
+                        val_dataloaders = [val_dataloaders]
+
+                    val_dataset = val_dataloaders[0].dataset
+                    if hasattr(val_dataset, 'image_size'):
+                        val_dataset.image_size = target_size
+                        val_dataset.transform = val_dataset._create_transform(target_size)
         
     def forward(self, x):
         """Forward pass through the student model.
@@ -265,16 +378,68 @@ class DistillationLightningModule(L.LightningModule):
         """
         return self.student(x)
     
+    def _compute_single_loss(self, s_feat: torch.Tensor, t_feat: torch.Tensor, loss_type: str) -> torch.Tensor:
+        """Compute a single loss between student and teacher feature.
+        
+        Args:
+            s_feat: Student feature tensor [B, C, H, W]
+            t_feat: Teacher feature tensor [B, C, H, W]
+            loss_type: Type of loss to compute
+            
+        Returns:
+            Loss value
+        """
+        if loss_type == 'mse':
+            return F.mse_loss(s_feat, t_feat)
+        
+        elif loss_type == 'cosine':
+            # Spatial cosine similarity (preserves spatial structure)
+            # Shape: [B, C, H, W]
+            B, C, H, W = s_feat.shape
+            
+            # Reshape to [B, C, H*W] and transpose to [B, H*W, C]
+            s_reshaped = s_feat.flatten(2).transpose(1, 2)  # [B, H*W, C]
+            t_reshaped = t_feat.flatten(2).transpose(1, 2)  # [B, H*W, C]
+            
+            # Normalize features (L2 normalization per spatial location)
+            s_norm = F.normalize(s_reshaped, p=2, dim=2)  # [B, H*W, C]
+            t_norm = F.normalize(t_reshaped, p=2, dim=2)  # [B, H*W, C]
+            
+            # Compute cosine similarity at each spatial location
+            # Einstein sum: batch, spatial, channels -> batch, spatial
+            cosine_sim = torch.einsum('bpc,bpc->bp', s_norm, t_norm)  # [B, H*W]
+            
+            # Loss is 1 - mean(cosine_similarity)
+            # Average over spatial locations and batch
+            return 1.0 - cosine_sim.mean()
+        
+        elif loss_type == 'cosine_global':
+            # Global pooling version (alternative option)
+            s_flat = s_feat.flatten(2).mean(dim=2)  # [B, C]
+            t_flat = t_feat.flatten(2).mean(dim=2)  # [B, C]
+            return 1.0 - F.cosine_similarity(s_flat, t_flat, dim=1).mean()
+        
+        elif loss_type == 'kl_div':
+            # Apply softmax with temperature
+            s_soft = F.log_softmax(s_feat.flatten(2) / self.temperature, dim=1)
+            t_soft = F.softmax(t_feat.flatten(2) / self.temperature, dim=1)
+            return F.kl_div(s_soft, t_soft, reduction='batchmean') * (self.temperature ** 2)
+        
+        else:
+            raise ValueError(f"Unknown loss type: {loss_type}")
+    
     def compute_distillation_loss(self, student_features: List[torch.Tensor], 
-                                  teacher_features: List[torch.Tensor]) -> torch.Tensor:
+                                  teacher_features: List[torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Compute distillation loss between student and teacher features.
+        
+        Supports multiple loss types with weighted combination.
         
         Args:
             student_features: List of feature tensors from student
             teacher_features: List of feature tensors from teacher
             
         Returns:
-            Distillation loss
+            Dictionary containing 'total' loss, individual loss components, and feature losses
         """
         # Handle single tensor outputs (convert to list)
         if not isinstance(student_features, (list, tuple)):
@@ -282,62 +447,131 @@ class DistillationLightningModule(L.LightningModule):
         if not isinstance(teacher_features, (list, tuple)):
             teacher_features = [teacher_features]
         
-        # If feature indexes are specified, features are already filtered by the models
-        # No need to filter again here
-        
         # Ensure same number of features
         if len(student_features) != len(teacher_features):
             raise ValueError(f"Mismatch in number of features: student has {len(student_features)}, "
                            f"teacher has {len(teacher_features)}")
         
         total_loss = 0.0
+        loss_dict = {}
         
-        for s_feat, t_feat in zip(student_features, teacher_features):
-            # TODO: Add dimension matching logic here when needed
-            # (stride and channel dimension matching will be added to Teacher class)
-            
-            if self.loss_type == 'mse':
-                loss = F.mse_loss(s_feat, t_feat)
-            
-            elif self.loss_type == 'cosine':
-                # Spatial cosine similarity (preserves spatial structure)
-                # Shape: [B, C, H, W]
-                B, C, H, W = s_feat.shape
-                
-                # Reshape to [B, C, H*W] and transpose to [B, H*W, C]
-                s_reshaped = s_feat.flatten(2).transpose(1, 2)  # [B, H*W, C]
-                t_reshaped = t_feat.flatten(2).transpose(1, 2)  # [B, H*W, C]
-                
-                # Normalize features (L2 normalization per spatial location)
-                s_norm = F.normalize(s_reshaped, p=2, dim=2)  # [B, H*W, C]
-                t_norm = F.normalize(t_reshaped, p=2, dim=2)  # [B, H*W, C]
-                
-                # Compute cosine similarity at each spatial location
-                # Einstein sum: batch, spatial, channels -> batch, spatial
-                cosine_sim = torch.einsum('bpc,bpc->bp', s_norm, t_norm)  # [B, H*W]
-                
-                # Loss is 1 - mean(cosine_similarity)
-                # Average over spatial locations and batch
-                loss = 1.0 - cosine_sim.mean()
-            
-            elif self.loss_type == 'cosine_global':
-                # Global pooling version (alternative option)
-                s_flat = s_feat.flatten(2).mean(dim=2)  # [B, C]
-                t_flat = t_feat.flatten(2).mean(dim=2)  # [B, C]
-                loss = 1.0 - F.cosine_similarity(s_flat, t_flat, dim=1).mean()
-            
-            elif self.loss_type == 'kl_div':
-                # Apply softmax with temperature
-                s_soft = F.log_softmax(s_feat.flatten(2) / self.temperature, dim=1)
-                t_soft = F.softmax(t_feat.flatten(2) / self.temperature, dim=1)
-                loss = F.kl_div(s_soft, t_soft, reduction='batchmean') * (self.temperature ** 2)
-            
-            else:
-                raise ValueError(f"Unknown loss type: {self.loss_type}")
-            
-            total_loss += loss
+        # Initialize loss component tracking for each loss type
+        loss_components = {loss_cfg['type']: 0.0 for loss_cfg in self.loss_configs}
         
-        return total_loss / len(student_features)
+        for idx, (s_feat, t_feat) in enumerate(zip(student_features, teacher_features)):
+            feature_loss = 0.0
+            
+            # Compute each loss type and combine with weights
+            for loss_cfg in self.loss_configs:
+                loss_type = loss_cfg['type']
+                loss_weight = loss_cfg['weight']
+                
+                # Compute single loss
+                single_loss = self._compute_single_loss(s_feat, t_feat, loss_type)
+                
+                # Weight and accumulate
+                weighted_loss = single_loss * loss_weight
+                feature_loss += weighted_loss
+                
+                # Track component for logging
+                loss_components[loss_type] += single_loss.detach()
+            
+            # Store individual feature loss (before stage weighting)
+            loss_dict[f'feat_{idx}'] = feature_loss.detach()
+            
+            # Apply stage-specific weight if specified
+            if self.stage_loss_weights is not None:
+                if idx >= len(self.stage_loss_weights):
+                    raise ValueError(f"Stage loss weights list has {len(self.stage_loss_weights)} elements, "
+                                   f"but trying to access index {idx}. Ensure stage_loss_weights has "
+                                   f"same length as number of output features ({len(student_features)}).")
+                weight = self.stage_loss_weights[idx].to(feature_loss.device)
+                feature_loss = feature_loss * weight
+                loss_dict[f'feat_{idx}_weighted'] = feature_loss.detach()
+            
+            # Accumulate loss
+            total_loss += feature_loss
+        
+        # Average across features
+        total_loss = total_loss / len(student_features)
+        
+        # Add total to dict
+        loss_dict['total'] = total_loss
+        
+        # Add individual loss components (averaged across features)
+        for loss_type, component_loss in loss_components.items():
+            loss_dict[f'loss_{loss_type}'] = component_loss / len(student_features)
+        
+        return loss_dict
+    
+    def _calculate_angular_spread(self, features: torch.Tensor):
+        """
+        Measures how 'diverse' the features are on the hypersphere.
+        Args:
+            features: [B, C, H, W] tensor
+        Returns:
+            spread_deg: Average angle (in degrees) between random pairs in the batch
+        """
+        B, C, H, W = features.shape
+        # 1. Global Average Pooling to get one vector per image
+        # (Or sample specific spatial locations)
+        v = torch.mean(features, dim=(2, 3))  # [B, C]
+        
+        # 2. L2 Normalize to project onto the unit sphere
+        v_norm = F.normalize(v, p=2, dim=1)
+        
+        # 3. Compute all-to-all cosine similarity matrix [B, B]
+        cos_sim_matrix = torch.matmul(v_norm, v_norm.t())
+        
+        # 4. Extract off-diagonal elements (pairs of different images)
+        # We want to know how different image A is from image B
+        mask = ~torch.eye(B, dtype=torch.bool, device=features.device)
+        pair_sims = cos_sim_matrix[mask]
+        
+        # 5. Convert to degrees for human readability
+        # Clamp to avoid acos NaNs at 1.0000001
+        angles_rad = torch.acos(pair_sims.clamp(-1.0 + 1e-7, 1.0 - 1e-7))
+        spread_deg = torch.rad2deg(angles_rad.mean())
+        
+        return spread_deg
+    
+    def _compute_gradient_norms(self):
+        """Compute gradient norms for student adapters and student stages.
+        
+        Returns:
+            Dictionary containing gradient norms for each component
+        """
+        grad_norms = {}
+        
+        # Compute gradient norms for student channel adapters
+        for idx, adapter in enumerate(self.student.channel_adapters):
+            if not isinstance(adapter, nn.Identity):
+                total_norm = 0.0
+                num_params = 0
+                for p in adapter.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                        num_params += 1
+                if num_params > 0:
+                    total_norm = total_norm ** 0.5
+                    grad_norms[f'student_adapter_{idx}'] = total_norm
+        
+        # Compute gradient norms for student backbone stages
+        if hasattr(self.student.model, 'stages'):
+            for idx, stage in enumerate(self.student.model.stages):
+                total_norm = 0.0
+                num_params = 0
+                for p in stage.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                        num_params += 1
+                if num_params > 0:
+                    total_norm = total_norm ** 0.5
+                    grad_norms[f'student_stage_{idx}'] = total_norm
+        
+        return grad_norms
     
     def training_step(self, batch, batch_idx):
         """Training step for knowledge distillation.
@@ -358,13 +592,30 @@ class DistillationLightningModule(L.LightningModule):
         with torch.no_grad():
             teacher_features = self.teacher(images)
         
-        # Compute distillation loss
-        loss = self.compute_distillation_loss(student_features, teacher_features)
+        # Compute distillation loss (returns dict)
+        loss_dict = self.compute_distillation_loss(student_features, teacher_features)
         
-        # Log metrics
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        # Log all metrics
+        self.log('train_loss', loss_dict['total'], on_step=True, on_epoch=True, prog_bar=True)
         
-        return loss
+        # Log individual feature losses and loss components
+        for key, value in loss_dict.items():
+            if key != 'total':
+                self.log(f'train_{key}_loss' if not key.startswith('loss_') else f'train_{key}', 
+                        value, on_step=False, on_epoch=True, prog_bar=False)
+        
+        return loss_dict['total']
+    
+    def on_before_optimizer_step(self, optimizer):
+        """Called before optimizer.step(). Log gradient norms here.
+        
+        Args:
+            optimizer: The optimizer being used
+        """
+        # Compute and log gradient norms
+        grad_norms = self._compute_gradient_norms()
+        for name, norm in grad_norms.items():
+            self.log(f'grad_norm/{name}', norm, on_step=False, on_epoch=True, prog_bar=False)
     
     def validation_step(self, batch, batch_idx):
         """Validation step.
@@ -382,44 +633,195 @@ class DistillationLightningModule(L.LightningModule):
         with torch.no_grad():
             teacher_features = self.teacher(images)
         
-        # Compute distillation loss
-        loss = self.compute_distillation_loss(student_features, teacher_features)
+        # Compute distillation loss (returns dict)
+        loss_dict = self.compute_distillation_loss(student_features, teacher_features)
         
-        # Log metrics
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        # Log all metrics
+        self.log('val_loss', loss_dict['total'], on_step=False, on_epoch=True, prog_bar=True)
+        
+        # Log individual feature losses and loss components
+        for key, value in loss_dict.items():
+            if key != 'total':
+                self.log(f'val_{key}_loss' if not key.startswith('loss_') else f'val_{key}', 
+                        value, on_step=False, on_epoch=True, prog_bar=False)
+        
+        # Calculate and log angular spread for feature diversity monitoring
+        # Handle single tensor outputs (convert to list) - make copies for iteration
+        student_features_list = list(student_features) if isinstance(student_features, (list, tuple)) else [student_features]
+        teacher_features_list = list(teacher_features) if isinstance(teacher_features, (list, tuple)) else [teacher_features]
+        
+        # Get actual feature indices for logging (use list index if indices not specified)
+        feature_indices = self.student_feature_indexes if self.student_feature_indexes else list(range(len(student_features_list)))
+        
+        for list_idx, (s_feat, t_feat) in enumerate(zip(student_features_list, teacher_features_list)):
+            # Use actual layer index for logging
+            layer_idx = feature_indices[list_idx] if list_idx < len(feature_indices) else list_idx
+            
+            # Calculate angular spread for student features
+            student_spread = self._calculate_angular_spread(s_feat)
+            self.log(f'val_angular_spread/student_feat_{layer_idx}', student_spread.item(), 
+                    on_step=True, on_epoch=True, prog_bar=False)
+            
+            # Calculate angular spread for teacher features
+            teacher_spread = self._calculate_angular_spread(t_feat)
+            self.log(f'val_angular_spread/teacher_feat_{layer_idx}', teacher_spread.item(), 
+                    on_step=True, on_epoch=True, prog_bar=False)
+            
+            # Calculate the difference (how well student matches teacher diversity)
+            spread_diff = torch.abs(student_spread - teacher_spread)
+            self.log(f'val_angular_spread/diff_feat_{layer_idx}', spread_diff.item(), 
+                    on_step=True, on_epoch=True, prog_bar=False)
     
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers.
         
         Returns:
-            Optimizer configuration
+            Optimizer configuration (with optional scheduler)
         """
         optimizer_cfg = self.config['training']['optimizer']
         optimizer_name = optimizer_cfg['name'].lower()
         lr = optimizer_cfg['lr']
         weight_decay = optimizer_cfg['weight_decay']
+        llrd_decay = optimizer_cfg.get('llrd_decay', 0.95)
+        
+        # Create parameter groups with LLRD
+        param_groups = []
+        
+        # 1. Student adapters: High LR with regularization
+        param_groups.append({
+            'params': self.student.channel_adapters.parameters(),
+            'lr': lr * 10,
+            'weight_decay': 0.05
+        })
+        
+        # 2. Student backbone with LLRD: Apply layer-wise decay
+        # Access student backbone stages if available (timm models typically have stages or blocks)
+        if hasattr(self.student.model, 'stages'):
+            stages = list(self.student.model.stages)
+            num_stages = len(stages)
+            
+            # Apply LLRD: deepest stage gets base_lr, earlier stages get decayed LR
+            for i, stage in enumerate(reversed(stages)):
+                stage_lr = lr * (llrd_decay ** i)
+                param_groups.append({
+                    'params': stage.parameters(),
+                    'lr': stage_lr,
+                    'weight_decay': weight_decay
+                })
+            
+            # Stem/embedding gets most decay
+            if hasattr(self.student.model, 'patch_embed') or hasattr(self.student.model, 'stem'):
+                stem_module = getattr(self.student.model, 'patch_embed', None) or getattr(self.student.model, 'stem', None)
+                stem_lr = lr * (llrd_decay ** num_stages)
+                param_groups.append({
+                    'params': stem_module.parameters(),
+                    'lr': stem_lr,
+                    'weight_decay': weight_decay
+                })
+        else:
+            # Fallback: No stage structure, use all student params with base LR
+            param_groups.append({
+                'params': self.student.model.parameters(),
+                'lr': lr,
+                'weight_decay': weight_decay
+            })
         
         if optimizer_name == 'adamw':
-            optimizer = torch.optim.AdamW(
-                self.student.parameters(),
-                lr=lr,
-                weight_decay=weight_decay
-            )
+            optimizer = torch.optim.AdamW(param_groups)
         elif optimizer_name == 'adam':
-            optimizer = torch.optim.Adam(
-                self.student.parameters(),
-                lr=lr,
-                weight_decay=weight_decay
-            )
+            optimizer = torch.optim.Adam(param_groups)
         elif optimizer_name == 'sgd':
             momentum = optimizer_cfg.get('momentum', 0.9)
             optimizer = torch.optim.SGD(
-                self.student.parameters(),
-                lr=lr,
-                momentum=momentum,
-                weight_decay=weight_decay
+                param_groups,
+                momentum=momentum
             )
         else:
             raise ValueError(f"Unknown optimizer: {optimizer_name}")
         
+        # Setup learning rate scheduler if configured
+        scheduler_cfg = self.config['training'].get('scheduler')
+        if scheduler_cfg:
+            scheduler = self._create_scheduler(optimizer, scheduler_cfg)
+            return {
+                'optimizer': optimizer,
+                'lr_scheduler': {
+                    'scheduler': scheduler,
+                    'interval': 'epoch',
+                    'frequency': 1
+                }
+            }
+        
         return optimizer
+    
+    def _create_scheduler(self, optimizer, scheduler_cfg):
+        """Create learning rate scheduler from config.
+        
+        Args:
+            optimizer: The optimizer to schedule
+            scheduler_cfg: Scheduler configuration dict
+            
+        Returns:
+            Learning rate scheduler
+        """
+        scheduler_name = scheduler_cfg['name'].lower()
+        max_epochs = self.config['training']['max_epochs']
+        
+        if scheduler_name == 'cosine':
+            warmup_epochs = scheduler_cfg.get('warmup_epochs', 0)
+            min_lr = scheduler_cfg.get('min_lr', 0.0)
+            
+            if warmup_epochs > 0:
+                # Cosine annealing with warmup
+                from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+                
+                # Warmup phase
+                warmup_scheduler = LinearLR(
+                    optimizer,
+                    start_factor=1e-3,
+                    end_factor=1.0,
+                    total_iters=warmup_epochs
+                )
+                
+                # Cosine annealing phase
+                cosine_scheduler = CosineAnnealingLR(
+                    optimizer,
+                    T_max=max_epochs - warmup_epochs,
+                    eta_min=min_lr
+                )
+                
+                # Combine them
+                scheduler = SequentialLR(
+                    optimizer,
+                    schedulers=[warmup_scheduler, cosine_scheduler],
+                    milestones=[warmup_epochs]
+                )
+            else:
+                # Just cosine annealing
+                from torch.optim.lr_scheduler import CosineAnnealingLR
+                scheduler = CosineAnnealingLR(
+                    optimizer,
+                    T_max=max_epochs,
+                    eta_min=min_lr
+                )
+        
+        elif scheduler_name == 'step':
+            from torch.optim.lr_scheduler import StepLR
+            step_size = scheduler_cfg.get('step_size', 30)
+            gamma = scheduler_cfg.get('gamma', 0.1)
+            scheduler = StepLR(optimizer, step_size=step_size, gamma=gamma)
+        
+        elif scheduler_name == 'polynomial':
+            from torch.optim.lr_scheduler import PolynomialLR
+            power = scheduler_cfg.get('power', 1.0)
+            scheduler = PolynomialLR(optimizer, total_iters=max_epochs, power=power)
+        
+        elif scheduler_name == 'exponential':
+            from torch.optim.lr_scheduler import ExponentialLR
+            gamma = scheduler_cfg.get('gamma', 0.95)
+            scheduler = ExponentialLR(optimizer, gamma=gamma)
+        
+        else:
+            raise ValueError(f"Unknown scheduler: {scheduler_name}")
+        
+        return scheduler

@@ -40,7 +40,8 @@ class SA1BDataset(Dataset):
         transform: Optional[Callable] = None,
         image_size: int = 224,
         return_path: bool = False,
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
+        augmentation_config: Optional[dict] = None
     ):
         """
         Initialize SA-1B dataset.
@@ -53,6 +54,7 @@ class SA1BDataset(Dataset):
             image_size: Target image size for default transforms
             return_path: If True, return (image, path) instead of just image
             limit: Optional limit on number of images to load (useful for testing)
+            augmentation_config: Optional dict with augmentation settings from config
         """
         self.root_dir = Path(root_dir)
         self.split = split
@@ -60,10 +62,12 @@ class SA1BDataset(Dataset):
         self.transform = transform
         self.return_path = return_path
         self.limit = limit
+        self.augmentation_config = augmentation_config
+        self.image_size = image_size  # Store for dynamic updates
         
         # Set up default transforms if none provided
         if self.transform is None:
-            self.transform = self._default_transform(image_size)
+            self.transform = self._create_transform(self.image_size)
         
         # Collect all image paths
         self.image_paths = self._collect_image_paths()
@@ -75,39 +79,63 @@ class SA1BDataset(Dataset):
         else:
             print(f"SA-1B {split} dataset initialized with {len(self.image_paths):,} images")
     
-    def _default_transform(self, image_size: int):
+    def _create_transform(self, image_size: int):
         """
-        Create default ImageNet-style transforms.
+        Create transforms based on split and augmentation config.
         
-        Transforms applied:
-        - Training: RandomResizedCrop, RandomHorizontalFlip, ToTensor, Normalize
-        - Validation: Resize, CenterCrop, ToTensor, Normalize
+        For training: Uses configurable augmentations from config
+        For validation: Simple resize, center crop, normalize
         
         Note: ToTensor converts PIL Image [0, 255] to float tensor [0.0, 1.0]
               Normalize applies: output = (input - mean) / std
               ImageNet stats: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        
-        GPU transfer happens in the training loop, not here.
         """
+        # ImageNet normalization stats
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+        
         if self.split == 'train':
-            return transforms.Compose([
-                transforms.RandomResizedCrop(image_size),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),  # Converts to [0, 1] float tensor
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],  # ImageNet mean
-                    std=[0.229, 0.224, 0.225]     # ImageNet std
+            transform_list = []
+            
+            # Check if augmentation is enabled
+            aug_config = self.augmentation_config
+            if aug_config and aug_config.get('enabled', True):
+                # Random Resized Crop (always applied if augmentation enabled)
+                crop_config = aug_config.get('random_resized_crop', {})
+                scale = crop_config.get('scale', [0.5, 1.0])
+                ratio = crop_config.get('ratio', [0.75, 1.333])
+                transform_list.append(
+                    transforms.RandomResizedCrop(
+                        image_size, 
+                        scale=tuple(scale), 
+                        ratio=tuple(ratio)
+                    )
                 )
+                
+                # Horizontal Flip
+                hflip_config = aug_config.get('horizontal_flip', {})
+                if hflip_config.get('enabled', True):
+                    p = hflip_config.get('p', 0.5)
+                    transform_list.append(transforms.RandomHorizontalFlip(p=p))
+            else:
+                # Augmentation disabled - use simple random crop
+                transform_list.append(transforms.RandomResizedCrop(image_size))
+                transform_list.append(transforms.RandomHorizontalFlip())
+            
+            # Always add ToTensor and Normalize
+            transform_list.extend([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std)
             ])
+            
+            return transforms.Compose(transform_list)
+        
         else:  # val
             return transforms.Compose([
                 transforms.Resize(int(image_size * 1.14)),  # 256 for 224
                 transforms.CenterCrop(image_size),
-                transforms.ToTensor(),  # Converts to [0, 1] float tensor
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],  # ImageNet mean
-                    std=[0.229, 0.224, 0.225]     # ImageNet std
-                )
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std)
             ])
     
     def _collect_image_paths(self) -> List[Path]:
@@ -195,12 +223,13 @@ def create_sa1b_dataloaders_from_config(config: dict) -> Tuple[DataLoader, DataL
         {
             'data': {
                 'root_dir': 'datasets/sa-1b',
-                'image_size': 224,
                 'val_size': 10000,
+                'augmentation': {...},  # augmentation config dict
                 'train_limit': None,  # optional
                 'val_limit': None     # optional
             },
             'training': {
+                'image_size': 224,  # or dict for progressive training
                 'batch_size': 64,
                 'num_workers': 4
             }
@@ -209,13 +238,23 @@ def create_sa1b_dataloaders_from_config(config: dict) -> Tuple[DataLoader, DataL
     data_cfg = config['data']
     training_cfg = config['training']
     
+    # Get initial image size (handle both int and dict formats)
+    image_size_config = training_cfg.get('image_size', 224)
+    if isinstance(image_size_config, dict):
+        # Progressive training: use the first (epoch 0) size
+        image_size = image_size_config[min(image_size_config.keys())]
+    else:
+        # Fixed size
+        image_size = image_size_config
+    
     return create_sa1b_dataloaders(
         root_dir=data_cfg.get('root_dir', 'datasets/sa-1b'),
         batch_size=training_cfg.get('batch_size', 32),
         val_size=data_cfg.get('val_size', 10000),
-        image_size=data_cfg.get('image_size', 224),
+        image_size=image_size,
         num_workers=training_cfg.get('num_workers', 4),
         pin_memory=True,
+        augmentation_config=data_cfg.get('augmentation'),
         train_limit=data_cfg.get('train_limit'),
         val_limit=data_cfg.get('val_limit')
     )
@@ -230,6 +269,7 @@ def create_sa1b_dataloaders(
     pin_memory: bool = True,
     train_transform: Optional[Callable] = None,
     val_transform: Optional[Callable] = None,
+    augmentation_config: Optional[dict] = None,
     train_limit: Optional[int] = None,
     val_limit: Optional[int] = None
 ) -> Tuple[DataLoader, DataLoader]:
@@ -245,6 +285,7 @@ def create_sa1b_dataloaders(
         pin_memory: Whether to pin memory for faster GPU transfer
         train_transform: Optional custom transform for training
         val_transform: Optional custom transform for validation
+        augmentation_config: Optional dict with augmentation settings
         train_limit: Optional limit on number of training images (for testing/debugging)
         val_limit: Optional limit on number of validation images (for testing/debugging)
         
@@ -258,6 +299,7 @@ def create_sa1b_dataloaders(
         val_size=val_size,
         transform=train_transform,
         image_size=image_size,
+        augmentation_config=augmentation_config,
         limit=train_limit
     )
     
@@ -267,6 +309,7 @@ def create_sa1b_dataloaders(
         val_size=val_size,
         transform=val_transform,
         image_size=image_size,
+        augmentation_config=None,  # No augmentation for validation
         limit=val_limit
     )
     
