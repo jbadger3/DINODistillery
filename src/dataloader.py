@@ -4,7 +4,7 @@ DataLoaders for various datasets including SA-1B (Segment Anything 1 Billion).
 
 import os
 from pathlib import Path
-from typing import Optional, Callable, Tuple, List
+from typing import Optional, Callable, Tuple, List, Union
 import random
 
 import torch
@@ -41,7 +41,13 @@ class SA1BDataset(Dataset):
         image_size: int = 224,
         return_path: bool = False,
         limit: Optional[int] = None,
-        augmentation_config: Optional[dict] = None
+        augmentation_config: Optional[dict] = None,
+        student_transform: Optional[Callable] = None,
+        teacher_transform: Optional[Callable] = None,
+        student_target_size: Optional[int] = None,
+        teacher_target_size: Optional[int] = None,
+        return_student_teacher: bool = False,
+        sync_student_teacher_augs: bool = True
     ):
         """
         Initialize SA-1B dataset.
@@ -55,6 +61,12 @@ class SA1BDataset(Dataset):
             return_path: If True, return (image, path) instead of just image
             limit: Optional limit on number of images to load (useful for testing)
             augmentation_config: Optional dict with augmentation settings from config
+            student_transform: Optional student transform for dual-view mode
+            teacher_transform: Optional teacher transform for dual-view mode
+            student_target_size: Student target size for dual-view mode
+            teacher_target_size: Teacher target size for dual-view mode
+            return_student_teacher: If True, return (student_image, teacher_image)
+            sync_student_teacher_augs: If True, share same random aug decisions
         """
         self.root_dir = Path(root_dir)
         self.split = split
@@ -64,10 +76,24 @@ class SA1BDataset(Dataset):
         self.limit = limit
         self.augmentation_config = augmentation_config
         self.image_size = image_size  # Store for dynamic updates
+        self.return_student_teacher = return_student_teacher
+        self.sync_student_teacher_augs = sync_student_teacher_augs
+
+        self.student_target_size = student_target_size if student_target_size is not None else image_size
+        self.teacher_target_size = teacher_target_size if teacher_target_size is not None else image_size
+        self.student_transform = student_transform
+        self.teacher_transform = teacher_transform
         
-        # Set up default transforms if none provided
-        if self.transform is None:
-            self.transform = self._create_transform(self.image_size)
+        # Set up transforms
+        if self.return_student_teacher:
+            if self.student_transform is None:
+                self.student_transform = self._create_transform(self.student_target_size)
+            if self.teacher_transform is None:
+                self.teacher_transform = self._create_transform(self.teacher_target_size)
+        else:
+            # Backward-compatible single-view behavior
+            if self.transform is None:
+                self.transform = self._create_transform(self.image_size)
         
         # Collect all image paths
         self.image_paths = self._collect_image_paths()
@@ -177,8 +203,20 @@ class SA1BDataset(Dataset):
     
     def __len__(self) -> int:
         return len(self.image_paths)
+
+    def update_image_size(self, image_size: int):
+        """Update single-view transform image size."""
+        self.image_size = image_size
+        self.transform = self._create_transform(image_size)
+
+    def update_dual_image_sizes(self, student_target_size: int, teacher_target_size: int):
+        """Update dual-view transforms with potentially different sizes."""
+        self.student_target_size = student_target_size
+        self.teacher_target_size = teacher_target_size
+        self.student_transform = self._create_transform(student_target_size)
+        self.teacher_transform = self._create_transform(teacher_target_size)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, str]:
+    def __getitem__(self, idx: int) -> Union[torch.Tensor, Tuple[torch.Tensor, str], Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, str]]:
         """
         Get an image from the dataset.
         
@@ -199,14 +237,44 @@ class SA1BDataset(Dataset):
             # Return a blank image on error
             image = Image.new('RGB', (224, 224), color='black')
         
-        # Apply transforms
+        if self.return_student_teacher:
+            if self.sync_student_teacher_augs and self.split == 'train':
+                # Ensure random crop/flip are identical across student and teacher views
+                torch_state = torch.get_rng_state()
+                random_state = random.getstate()
+
+                student_image = self.student_transform(image.copy())
+
+                torch.set_rng_state(torch_state)
+                random.setstate(random_state)
+                teacher_image = self.teacher_transform(image.copy())
+            else:
+                student_image = self.student_transform(image.copy())
+                teacher_image = self.teacher_transform(image.copy())
+
+            if self.return_path:
+                return student_image, teacher_image, str(img_path)
+            return student_image, teacher_image
+
+        # Apply transforms (single-view mode)
         if self.transform:
             image = self.transform(image)
-        
+
         if self.return_path:
             return image, str(img_path)
-        else:
-            return image
+        return image
+
+
+def _get_initial_image_size(image_size_config):
+    """Get initial image size from int or epoch->size dict."""
+    if isinstance(image_size_config, dict):
+        return image_size_config[min(image_size_config.keys())]
+    return image_size_config
+
+
+def _scale_image_size(image_size: int, resize_factor: float) -> int:
+    """Scale image size by factor and clamp to at least 1 pixel."""
+    return max(1, int(round(float(image_size) * float(resize_factor))))
 
 
 def create_sa1b_dataloaders_from_config(config: dict) -> Tuple[DataLoader, DataLoader]:
@@ -237,15 +305,23 @@ def create_sa1b_dataloaders_from_config(config: dict) -> Tuple[DataLoader, DataL
     """
     data_cfg = config['data']
     training_cfg = config['training']
+
+    # Normalize augmentation config (supports bool or dict)
+    augmentation_config = data_cfg.get('augmentation')
+    if isinstance(augmentation_config, bool):
+        augmentation_config = {'enabled': augmentation_config}
     
-    # Get initial image size (handle both int and dict formats)
+    # Base size from training config (supports progressive schedule from training.image_size)
     image_size_config = training_cfg.get('image_size', 224)
-    if isinstance(image_size_config, dict):
-        # Progressive training: use the first (epoch 0) size
-        image_size = image_size_config[min(image_size_config.keys())]
-    else:
-        # Fixed size
-        image_size = image_size_config
+    image_size = _get_initial_image_size(image_size_config)
+
+    # Dual-view settings from data config
+    dual_views = data_cfg.get('dual_views', False)
+    student_resize_factor = data_cfg.get('student_resize_factor', 1.0)
+    teacher_resize_factor = data_cfg.get('teacher_resize_factor', 1.0)
+    student_target_size = _scale_image_size(image_size, student_resize_factor)
+    teacher_target_size = _scale_image_size(image_size, teacher_resize_factor)
+    sync_student_teacher_augs = data_cfg.get('sync_student_teacher_augs', True)
     
     return create_sa1b_dataloaders(
         root_dir=data_cfg.get('root_dir', 'datasets/sa-1b'),
@@ -254,9 +330,15 @@ def create_sa1b_dataloaders_from_config(config: dict) -> Tuple[DataLoader, DataL
         image_size=image_size,
         num_workers=training_cfg.get('num_workers', 4),
         pin_memory=True,
-        augmentation_config=data_cfg.get('augmentation'),
+        augmentation_config=augmentation_config,
         train_limit=data_cfg.get('train_limit'),
-        val_limit=data_cfg.get('val_limit')
+        val_limit=data_cfg.get('val_limit'),
+        return_student_teacher=dual_views,
+        student_target_size=student_target_size,
+        teacher_target_size=teacher_target_size,
+        student_resize_factor=student_resize_factor,
+        teacher_resize_factor=teacher_resize_factor,
+        sync_student_teacher_augs=sync_student_teacher_augs
     )
 
 
@@ -271,7 +353,13 @@ def create_sa1b_dataloaders(
     val_transform: Optional[Callable] = None,
     augmentation_config: Optional[dict] = None,
     train_limit: Optional[int] = None,
-    val_limit: Optional[int] = None
+    val_limit: Optional[int] = None,
+    return_student_teacher: bool = False,
+    student_target_size: Optional[int] = None,
+    teacher_target_size: Optional[int] = None,
+    student_resize_factor: float = 1.0,
+    teacher_resize_factor: float = 1.0,
+    sync_student_teacher_augs: bool = True
 ) -> Tuple[DataLoader, DataLoader]:
     """
     Create train and validation dataloaders for SA-1B dataset.
@@ -288,11 +376,21 @@ def create_sa1b_dataloaders(
         augmentation_config: Optional dict with augmentation settings
         train_limit: Optional limit on number of training images (for testing/debugging)
         val_limit: Optional limit on number of validation images (for testing/debugging)
+        return_student_teacher: If True, dataset returns student and teacher views
+        student_target_size: Optional student target size for dual-view mode
+        teacher_target_size: Optional teacher target size for dual-view mode
+        student_resize_factor: Student view size multiplier applied to base image_size
+        teacher_resize_factor: Teacher view size multiplier applied to base image_size
+        sync_student_teacher_augs: If True, sync train-time random augs across views
         
     Returns:
         (train_loader, val_loader)
     """
     # Create datasets
+    if return_student_teacher:
+        student_target_size = student_target_size if student_target_size is not None else _scale_image_size(image_size, student_resize_factor)
+        teacher_target_size = teacher_target_size if teacher_target_size is not None else _scale_image_size(image_size, teacher_resize_factor)
+
     train_dataset = SA1BDataset(
         root_dir=root_dir,
         split='train',
@@ -300,7 +398,13 @@ def create_sa1b_dataloaders(
         transform=train_transform,
         image_size=image_size,
         augmentation_config=augmentation_config,
-        limit=train_limit
+        limit=train_limit,
+        student_transform=None,
+        teacher_transform=None,
+        student_target_size=student_target_size,
+        teacher_target_size=teacher_target_size,
+        return_student_teacher=return_student_teacher,
+        sync_student_teacher_augs=sync_student_teacher_augs
     )
     
     val_dataset = SA1BDataset(
@@ -310,7 +414,13 @@ def create_sa1b_dataloaders(
         transform=val_transform,
         image_size=image_size,
         augmentation_config=None,  # No augmentation for validation
-        limit=val_limit
+        limit=val_limit,
+        student_transform=None,
+        teacher_transform=None,
+        student_target_size=student_target_size,
+        teacher_target_size=teacher_target_size,
+        return_student_teacher=return_student_teacher,
+        sync_student_teacher_augs=False
     )
     
     # Create dataloaders

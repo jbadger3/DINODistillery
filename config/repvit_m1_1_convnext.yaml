@@ -11,8 +11,8 @@ teacher:
 # Training Configuration
 training:
   max_epochs: 400             # Feature distillation: 50-150 epochs (typically faster than KD-only)
-  batch_size: 8             # Adjust based on GPU memory (64-256 typical)
-  accumulate_grad_batches: 2  # Number of batches to accumulate gradients before optimizer step
+  batch_size: 64             # Adjust based on GPU memory (64-256 typical)
+  accumulate_grad_batches: 1  # Number of batches to accumulate gradients before optimizer step
                               # Effective batch size = batch_size * accumulate_grad_batches
                               # Use higher values (2, 4, 8) to simulate larger batches with limited GPU memory
   
@@ -28,8 +28,8 @@ training:
   #   0: 224      # Epochs 0-49: use 224x224
   #   50: 384     # Epochs 50+: use 384x384
   
-  num_workers: 4
-  accelerator: "mps"          # gpu (CUDA/ROCm), mps (Apple Silicon), cpu, tpu
+  num_workers: 16
+  accelerator: "cuda"          # gpu (CUDA/ROCm), mps (Apple Silicon), cpu, tpu
                               # Use "mps" for M1/M2/M3 Macs, "gpu" for NVIDIA/AMD
   devices: 1                  # Number of devices to use
   precision: "bf16-mixed"             # "32", "16-mixed", "bf16-mixed", "64", "16-true", "bf16-true", "32-true"
@@ -90,8 +90,8 @@ data:
       p: 0.5                   # Probability of applying horizontal flip
   
   # Optional: limit datasets for testing (null = use all data)
-  #train_limit: 100            # Limit training images for quick testing
-  #val_limit: 10              # Limit validation images for quick testing
+  #train_limit: 400            # Limit training images for quick testing
+  #val_limit: 20              # Limit validation images for quick testing
 
 # Evaluation Configuration
 evaluation:

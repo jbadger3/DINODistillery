@@ -1,18 +1,21 @@
 import torch 
 from torch import nn
-from typing import Union, List
+from typing import Optional, Union, List
 
 
 class Teacher(nn.Module):
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, is_vit: bool = False, out_feature_indexes: Optional[List[int]] = None,):
         """
         Wrapper class for a teacher model.
         
         Args:
             model: The neural network model to be used as a teacher.
+            is_vit: Boolean flag indicating if the model is a Vision Transformer (ViT).
         """
         super(Teacher, self).__init__()
         self.model = model
+        self.is_vit = is_vit
+        self.out_feature_indexes = out_feature_indexes
         self._freeze_model()
         
     def _freeze_model(self):
@@ -48,4 +51,4 @@ class Teacher(nn.Module):
         Returns:
             Output tensor(s) from the teacher model.
         """
-        return self.model(x)
+        return self.model.forward(x)

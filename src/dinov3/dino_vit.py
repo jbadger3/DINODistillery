@@ -4,7 +4,7 @@ Features extraction wrapper for DINOv3 ViT models using timm.
 This module provides a wrapper class that extracts features from DINOv3 ViT models
 using the timm library.
 """
-
+import math
 import torch
 from torch import nn
 import timm
@@ -99,10 +99,13 @@ class DINOViT(nn.Module):
             x: Input tensor
             
         Returns:
-            Feature tensor from the model backbone
+            Feature tensor from the model backbone (timm gives output in B, C, H, W format with CLS and register tokens removed)
         """
         if self.out_feature_indexes == None:
             outputs = self.encoder.forward_features(x)
+            
         else:
             outputs = self.encoder.forward_intermediates(x, indices=self.out_feature_indexes, intermediates_only=True)
+           
         return outputs
+    

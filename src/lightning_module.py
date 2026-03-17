@@ -15,6 +15,11 @@ from students.repvit.repvit_registry import REPVIT_MODELS
 import sys
 
 
+def _scale_image_size(image_size: int, resize_factor: float) -> int:
+    """Scale image size by factor and clamp to at least 1 pixel."""
+    return max(1, int(round(float(image_size) * float(resize_factor))))
+
+
 def get_model_registry_info(model_name: str, is_teacher: bool) -> Dict[str, Any]:
     """Get registry information for a model.
     
@@ -111,14 +116,6 @@ def validate_teacher_student_compatibility(
         print(f"Both models must output the same number of feature levels.")
         sys.exit(1)
     
-    # Check if strides match for each feature level
-    for idx, (t_feat, s_feat) in enumerate(zip(teacher_features, student_features)):
-        if t_feat['stride'] != s_feat['stride']:
-            print(f"ERROR: Feature strides don't match at level {idx}!")
-            print(f"Teacher stride: {t_feat['stride']}, Student stride: {s_feat['stride']}")
-            print(f"Both models must have matching strides for all feature levels.")
-            sys.exit(1)
-
 
 def create_teacher_model(config: Dict[str, Any]) -> Teacher:
     """Create teacher model from config.
@@ -140,12 +137,10 @@ def create_teacher_model(config: Dict[str, Any]) -> Teacher:
     
     # Get registry information
     teacher_info = get_model_registry_info(teacher_model_name, is_teacher=True)
-    
     # Determine model type and create appropriate backbone
     if teacher_model_name in VIT_MODELS or teacher_model_name in VIT_MODELS_QKVB:
         # Get the timm model name for ViT models
         timm_model_name = teacher_info['model_name']
-        
         # Create DINOViT model (freeze=True by default)
         backbone = DINOViT(
             model_name=timm_model_name,
@@ -218,12 +213,10 @@ def create_student_model(config: Dict[str, Any]) -> Student:
     timm_model_name = model_info['model_name']
     pretrained = student_cfg.get('pretrained', False)
     
-    # Create student backbone using timm with features_only mode
+    # Create student backbone using standard timm model (manual feature extraction in Student wrapper)
     backbone = timm.create_model(
         timm_model_name, 
-        pretrained=pretrained, 
-        features_only=True,
-        out_indices=student_out_feature_indexes if student_out_feature_indexes else None
+        pretrained=pretrained,
     )
     
     # Get adapter type from config
@@ -234,6 +227,7 @@ def create_student_model(config: Dict[str, Any]) -> Student:
         model=backbone,
         teacher_channels=[f['channels'] for f in teacher_features],
         student_channels=[f['channels'] for f in student_features],
+        out_feature_indexes=student_out_feature_indexes,
         adapter_type=adapter_type
     )
     
@@ -276,7 +270,12 @@ class DistillationLightningModule(L.LightningModule):
             self.stage_loss_weights = None
         
         # Progressive image size configuration
-        self.image_size_schedule = self._parse_image_size_config(config['training'].get('image_size', 224))
+        training_size_cfg = config['training'].get('image_size', 224)
+        data_cfg = config.get('data', {})
+        self.dual_views = data_cfg.get('dual_views', False)
+        self.student_resize_factor = float(data_cfg.get('student_resize_factor', 1.0))
+        self.teacher_resize_factor = float(data_cfg.get('teacher_resize_factor', 1.0))
+        self.image_size_schedule = self._parse_image_size_config(training_size_cfg)
     
     def _parse_loss_config(self, distillation_config: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Parse loss configuration from distillation config.
@@ -336,25 +335,47 @@ class DistillationLightningModule(L.LightningModule):
         else:
             # Fallback to first size
             return self.image_size_schedule[min(self.image_size_schedule.keys())]
-    
+
+    def _unpack_student_teacher_images(self, batch):
+        """Unpack batch to (student_images, teacher_images), supporting single and dual views."""
+        if isinstance(batch, (tuple, list)):
+            # Dual-view dataset output: (student_images, teacher_images[, path])
+            if len(batch) >= 2 and isinstance(batch[0], torch.Tensor) and isinstance(batch[1], torch.Tensor):
+                return batch[0], batch[1]
+            # Single-view dataset output with optional metadata: (images[, path])
+            if len(batch) >= 1 and isinstance(batch[0], torch.Tensor):
+                return batch[0], batch[0]
+
+        # Raw tensor batch
+        return batch, batch
+
     def on_train_epoch_start(self):
         """Called at the start of each training epoch."""
         current_epoch = self.current_epoch
-        target_size = self._get_current_image_size(current_epoch)
+        target_base_size = self._get_current_image_size(current_epoch)
+        target_student_size = _scale_image_size(target_base_size, self.student_resize_factor)
+        target_teacher_size = _scale_image_size(target_base_size, self.teacher_resize_factor)
         
         # Check if we need to update image size
         if current_epoch in self.image_size_schedule and current_epoch > 0:
             print(f"\n{'='*60}")
-            print(f"Epoch {current_epoch}: Updating image size to {target_size}x{target_size}")
+            if self.dual_views:
+                print(
+                    f"Epoch {current_epoch}: Updating image sizes "
+                    f"student={target_student_size}x{target_student_size}, "
+                    f"teacher={target_teacher_size}x{target_teacher_size}"
+                )
+            else:
+                print(f"Epoch {current_epoch}: Updating image size to {target_base_size}x{target_base_size}")
             print(f"{'='*60}\n")
             
             # Update transforms in train dataloader
             if self.trainer and self.trainer.train_dataloader:
                 train_dataset = self.trainer.train_dataloader.dataset
-                if hasattr(train_dataset, 'image_size'):
-                    train_dataset.image_size = target_size
-                    # Recreate transform with new size
-                    train_dataset.transform = train_dataset._create_transform(target_size)
+                if hasattr(train_dataset, 'update_dual_image_sizes') and getattr(train_dataset, 'return_student_teacher', False):
+                    train_dataset.update_dual_image_sizes(target_student_size, target_teacher_size)
+                elif hasattr(train_dataset, 'update_image_size'):
+                    train_dataset.update_image_size(target_base_size)
                 
                 # Update validation dataloader as well
                 if self.trainer.val_dataloaders:
@@ -363,9 +384,10 @@ class DistillationLightningModule(L.LightningModule):
                         val_dataloaders = [val_dataloaders]
 
                     val_dataset = val_dataloaders[0].dataset
-                    if hasattr(val_dataset, 'image_size'):
-                        val_dataset.image_size = target_size
-                        val_dataset.transform = val_dataset._create_transform(target_size)
+                    if hasattr(val_dataset, 'update_dual_image_sizes') and getattr(val_dataset, 'return_student_teacher', False):
+                        val_dataset.update_dual_image_sizes(target_student_size, target_teacher_size)
+                    elif hasattr(val_dataset, 'update_image_size'):
+                        val_dataset.update_image_size(target_base_size)
         
     def forward(self, x):
         """Forward pass through the student model.
@@ -583,14 +605,14 @@ class DistillationLightningModule(L.LightningModule):
         Returns:
             Loss value
         """
-        images = batch[0] if isinstance(batch, (tuple, list)) else batch
+        student_images, teacher_images = self._unpack_student_teacher_images(batch)
         
         # Get student features
-        student_features = self.student(images)
+        student_features = self.student(student_images)
         
         # Get teacher features (no gradient)
         with torch.no_grad():
-            teacher_features = self.teacher(images)
+            teacher_features = self.teacher(teacher_images)
         
         # Compute distillation loss (returns dict)
         loss_dict = self.compute_distillation_loss(student_features, teacher_features)
@@ -624,14 +646,14 @@ class DistillationLightningModule(L.LightningModule):
             batch: Input batch containing images and optional labels
             batch_idx: Batch index
         """
-        images = batch[0] if isinstance(batch, (tuple, list)) else batch
+        student_images, teacher_images = self._unpack_student_teacher_images(batch)
         
         # Get student features
-        student_features = self.student(images)
+        student_features = self.student(student_images)
         
         # Get teacher features (no gradient)
         with torch.no_grad():
-            teacher_features = self.teacher(images)
+            teacher_features = self.teacher(teacher_images)
         
         # Compute distillation loss (returns dict)
         loss_dict = self.compute_distillation_loss(student_features, teacher_features)

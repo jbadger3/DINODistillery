@@ -1,11 +1,12 @@
 import torch
 from torch import nn
-from typing import List, Union
+from typing import List, Union, Optional
 from adapters import create_adapter
 
 
 class Student(nn.Module):
     def __init__(self, model: nn.Module, teacher_channels: List[int], student_channels: List[int], 
+                 out_feature_indexes: Optional[List[int]] = None,
                  adapter_type: str = 'bottleneck'):
         """
         Wrapper class for a student model with channel adaptation.
@@ -19,10 +20,13 @@ class Student(nn.Module):
             teacher_channels: List of channel dimensions for each feature level from teacher.
             student_channels: List of channel dimensions for each feature level from student.
                              Adapters are added to transform student features to match teacher.
+            out_feature_indexes: Optional list of intermediate feature indices to extract.
+                                If None, uses the final feature map only.
             adapter_type: Type of adapter to use ('basic', 'bottleneck'). Default: 'bottleneck'
         """
         super(Student, self).__init__()
         self.model = model
+        self.out_feature_indexes = out_feature_indexes
         
         # Validate input
         if len(teacher_channels) != len(student_channels):
@@ -50,7 +54,16 @@ class Student(nn.Module):
         Returns:
             Output tensor(s) from the student model, with channels adapted to match teacher.
         """
-        features = self.model(x)
+        if self.out_feature_indexes is None:
+            features = self.model.forward_features(x)
+            features = features.contiguous()
+        else:
+            features = self.model.forward_intermediates(
+                x,
+                indices=self.out_feature_indexes,
+                intermediates_only=True,
+            )
+            features = [feat.contiguous() for feat in features]
         
         # Apply channel adapters to transform student features to teacher dimensions
         if isinstance(features, (list, tuple)):
