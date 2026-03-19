@@ -42,19 +42,65 @@ def setup_callbacks(config: dict, experiment_dir: str):
     
     # Checkpoint callback
     logging_cfg = config['logging']
+    eval_cfg = config.get('evaluation', {})
     checkpoint_dir = os.path.join(experiment_dir, 'checkpoints')
+    checkpoint_monitor = logging_cfg['checkpoint_monitor']
+    checkpoint_mode = logging_cfg['checkpoint_mode']
+    monitored_save_on_train_epoch_end = logging_cfg.get('save_on_train_epoch_end', False)
+    configured_every_n_epochs = int(logging_cfg.get('every_n_epochs', 1))
+    eval_every_n_epochs = int(eval_cfg.get('eval_every_n_epochs', 1))
+
+    # Keep checkpoint cadence aligned with validation cadence for val_* monitors.
+    if checkpoint_monitor.startswith('val_'):
+        monitored_every_n_epochs = eval_every_n_epochs
+        if configured_every_n_epochs != eval_every_n_epochs:
+            print(
+                "INFO: checkpoint_monitor is validation-based; using "
+                "evaluation.eval_every_n_epochs for monitored checkpoint cadence "
+                f"({eval_every_n_epochs}) instead of logging.every_n_epochs ({configured_every_n_epochs})."
+            )
+    else:
+        monitored_every_n_epochs = configured_every_n_epochs
+
+    # Avoid missing-metric warnings when monitoring validation metrics from train epoch end
+    if checkpoint_monitor.startswith('val_') and monitored_save_on_train_epoch_end:
+        print(
+            "WARNING: logging.save_on_train_epoch_end=true with checkpoint_monitor='val_*' "
+            "can trigger missing metric warnings before validation runs. "
+            "Overriding monitored checkpoint callback to save_on_train_epoch_end=false."
+        )
+        monitored_save_on_train_epoch_end = False
+
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
         filename='{epoch:03d}-{val_loss:.4f}',
-        monitor=logging_cfg['checkpoint_monitor'],
-        mode=logging_cfg['checkpoint_mode'],
+        monitor=checkpoint_monitor,
+        mode=checkpoint_mode,
         save_top_k=logging_cfg['save_top_k'],
-        every_n_epochs=logging_cfg.get('every_n_epochs', 1),
-        save_on_train_epoch_end=logging_cfg.get('save_on_train_epoch_end', False),
-        save_last=True,
+        every_n_epochs=monitored_every_n_epochs,
+        save_on_train_epoch_end=monitored_save_on_train_epoch_end,
+        save_last=False,
         verbose=True
     )
     callbacks.append(checkpoint_callback)
+
+    # Optional recovery checkpoint callback (train-epoch based, no monitor)
+    # Purpose: preserve resumable checkpoints even if validation has not run yet.
+    # Uses Lightning's built-in rolling last.ckpt behavior.
+    recovery_cfg = logging_cfg.get('recovery_checkpoint', {})
+    if recovery_cfg.get('enabled', True):
+        recovery_callback = ModelCheckpoint(
+            dirpath=checkpoint_dir,
+            filename='recovery-epoch{epoch:03d}',
+            monitor=None,
+            mode='min',
+            save_top_k=0,
+            every_n_epochs=recovery_cfg.get('every_n_epochs', 1),
+            save_on_train_epoch_end=True,
+            save_last=True,
+            verbose=True
+        )
+        callbacks.append(recovery_callback)
     
     # Early stopping callback
     early_stop_cfg = config['early_stopping']

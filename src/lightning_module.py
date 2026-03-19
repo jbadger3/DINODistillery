@@ -2,12 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
+import math
 from typing import Dict, List, Optional, Any
 from torch.utils.data import DataLoader
 import timm
 
 from teacher import Teacher
 from student import Student
+from gram_loss import GramLoss
 from dinov3.backbone_registry import VIT_MODELS, VIT_MODELS_QKVB, CONVNEXT_MODELS
 from dinov3.dino_vit import DINOViT
 from dinov3.dino_convnext import DINOConvNeXt
@@ -18,6 +20,84 @@ import sys
 def _scale_image_size(image_size: int, resize_factor: float) -> int:
     """Scale image size by factor and clamp to at least 1 pixel."""
     return max(1, int(round(float(image_size) * float(resize_factor))))
+
+
+class ImageSizeSGDRScheduler(torch.optim.lr_scheduler._LRScheduler):
+    """Cosine annealing scheduler with restarts aligned to image-size milestones."""
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        restart_epochs: List[int],
+        max_epochs: int,
+        min_lr: float = 0.0,
+        warmup_epochs: int = 0,
+        warmup_start_factor: float = 1e-3,
+        restart_lr_decay: float = 1.0,
+        last_epoch: int = -1,
+    ):
+        self.max_epochs = int(max_epochs)
+        self.min_lr = float(min_lr)
+        self.warmup_epochs = max(0, int(warmup_epochs))
+        self.warmup_start_factor = float(warmup_start_factor)
+        self.restart_lr_decay = float(restart_lr_decay)
+
+        # Build sorted unique restart points, always including epoch 0
+        parsed_restart_epochs = sorted({int(epoch) for epoch in restart_epochs if int(epoch) >= 0})
+        if 0 not in parsed_restart_epochs:
+            parsed_restart_epochs.insert(0, 0)
+
+        # Ignore restart points beyond max_epochs and append terminal boundary
+        parsed_restart_epochs = [epoch for epoch in parsed_restart_epochs if epoch < self.max_epochs]
+        self.restart_epochs = parsed_restart_epochs
+        self.boundaries = self.restart_epochs + [self.max_epochs]
+
+        super().__init__(optimizer, last_epoch)
+
+    def _find_cycle_bounds(self, epoch: int):
+        """Return (cycle_index, cycle_start, cycle_end) containing the given epoch."""
+        for idx in range(len(self.boundaries) - 1):
+            cycle_start = self.boundaries[idx]
+            cycle_end = self.boundaries[idx + 1]
+            if cycle_start <= epoch < cycle_end:
+                return idx, cycle_start, cycle_end
+        return len(self.boundaries) - 2, self.boundaries[-2], self.boundaries[-1]
+
+    def get_lr(self):
+        epoch = max(0, int(self.last_epoch))
+
+        # Global linear warmup at training start
+        if self.warmup_epochs > 0 and epoch < self.warmup_epochs:
+            # Use epoch/(warmup_epochs-1) so epoch 0 starts exactly at warmup_start_factor
+            # and the final warmup epoch reaches factor 1.0.
+            if self.warmup_epochs == 1:
+                progress = 1.0
+            else:
+                progress = float(epoch) / float(self.warmup_epochs - 1)
+            factor = self.warmup_start_factor + (1.0 - self.warmup_start_factor) * progress
+            return [base_lr * factor for base_lr in self.base_lrs]
+
+        cycle_index, cycle_start, cycle_end = self._find_cycle_bounds(epoch)
+
+        # For the initial cycle, start cosine decay after warmup completes.
+        effective_cycle_start = cycle_start
+        if cycle_start == 0 and self.warmup_epochs > 0:
+            effective_cycle_start = min(self.warmup_epochs, max(0, cycle_end - 1))
+
+        cycle_length = max(1, int(cycle_end - effective_cycle_start))
+        cycle_progress = float(epoch - effective_cycle_start) / float(cycle_length)
+        cycle_progress = min(max(cycle_progress, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * cycle_progress))
+
+        current_cycle_peak_lrs = [
+            max(self.min_lr, base_lr * (self.restart_lr_decay ** cycle_index))
+            for base_lr in self.base_lrs
+        ]
+
+        return [
+            self.min_lr + (peak_lr - self.min_lr) * cosine
+            for peak_lr in current_cycle_peak_lrs
+        ]
 
 
 def get_model_registry_info(model_name: str, is_teacher: bool) -> Dict[str, Any]:
@@ -268,6 +348,21 @@ class DistillationLightningModule(L.LightningModule):
             self.stage_loss_weights = torch.tensor(stage_loss_weights, dtype=torch.float32)
         else:
             self.stage_loss_weights = None
+
+        # Optional Gram loss configuration
+        self.gram_loss_config = self._parse_gram_loss_config(config['distillation'])
+        self.gram_loss_enabled = self.gram_loss_config['enabled']
+        self.gram_loss_weight = self.gram_loss_config['weight']
+        self.gram_loss_img_level = self.gram_loss_config['img_level']
+        self.gram_loss_schedule = self.gram_loss_config['epoch_schedule']
+        self.gram_loss_fn = None
+        if self.gram_loss_enabled:
+            self.gram_loss_fn = GramLoss(
+                apply_norm=self.gram_loss_config['apply_norm'],
+                img_level=self.gram_loss_img_level,
+                remove_neg=self.gram_loss_config['remove_neg'],
+                remove_only_teacher_neg=self.gram_loss_config['remove_only_teacher_neg'],
+            )
         
         # Progressive image size configuration
         training_size_cfg = config['training'].get('image_size', 224)
@@ -313,10 +408,90 @@ class DistillationLightningModule(L.LightningModule):
         """
         if isinstance(image_size_config, dict):
             # Already a schedule - just sort by epoch
-            return dict(sorted(image_size_config.items()))
+            normalized_schedule = {
+                int(epoch): int(size)
+                for epoch, size in image_size_config.items()
+            }
+            return dict(sorted(normalized_schedule.items()))
         else:
             # Single size - no schedule
             return {0: int(image_size_config)}
+
+    def _parse_gram_loss_config(self, distillation_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse optional Gram loss configuration.
+
+        Expected config format:
+            distillation:
+              gram_loss:
+                enabled: false
+                weight: 1.0
+                img_level: true
+                apply_norm: true
+                remove_neg: true
+                remove_only_teacher_neg: false
+                epochs:
+                  0: true
+                  50: false
+                  80: true
+        """
+        gram_cfg = distillation_config.get('gram_loss', {})
+
+        enabled = bool(gram_cfg.get('enabled', False))
+        weight = float(gram_cfg.get('weight', 1.0))
+        img_level = bool(gram_cfg.get('img_level', True))
+        apply_norm = bool(gram_cfg.get('apply_norm', True))
+        remove_neg = bool(gram_cfg.get('remove_neg', True))
+        remove_only_teacher_neg = bool(gram_cfg.get('remove_only_teacher_neg', False))
+
+        epoch_schedule_cfg = gram_cfg.get('epochs', {0: True})
+        if not isinstance(epoch_schedule_cfg, dict):
+            raise ValueError("distillation.gram_loss.epochs must be a dict mapping epoch -> bool")
+
+        epoch_schedule = {
+            int(epoch): bool(is_enabled)
+            for epoch, is_enabled in epoch_schedule_cfg.items()
+        }
+        epoch_schedule = dict(sorted(epoch_schedule.items()))
+
+        if enabled and weight < 0:
+            raise ValueError("distillation.gram_loss.weight must be >= 0")
+
+        if remove_neg and remove_only_teacher_neg:
+            raise ValueError(
+                "Only one of distillation.gram_loss.remove_neg or "
+                "distillation.gram_loss.remove_only_teacher_neg can be true"
+            )
+
+        return {
+            'enabled': enabled,
+            'weight': weight,
+            'img_level': img_level,
+            'apply_norm': apply_norm,
+            'remove_neg': remove_neg,
+            'remove_only_teacher_neg': remove_only_teacher_neg,
+            'epoch_schedule': epoch_schedule,
+        }
+
+    def _is_gram_loss_active(self, epoch: int) -> bool:
+        """Return whether Gram loss should be applied at the given epoch."""
+        if not self.gram_loss_enabled:
+            return False
+
+        applicable_epochs = [e for e in self.gram_loss_schedule.keys() if e <= epoch]
+        if not applicable_epochs:
+            return False
+
+        epoch_key = max(applicable_epochs)
+        return bool(self.gram_loss_schedule[epoch_key])
+
+    def _prepare_gram_features(self, feat: torch.Tensor) -> torch.Tensor:
+        """Convert feature tensors to the format expected by GramLoss."""
+        if feat.ndim == 4:
+            # [B, C, H, W] -> [B, N, C]
+            return feat.flatten(2).transpose(1, 2)
+        if feat.ndim in (2, 3):
+            return feat
+        raise ValueError(f"Unsupported feature shape for Gram loss: {feat.shape}")
     
     def _get_current_image_size(self, epoch: int) -> int:
         """Get the image size for a given epoch.
@@ -412,7 +587,9 @@ class DistillationLightningModule(L.LightningModule):
             Loss value
         """
         if loss_type == 'mse':
-            return F.mse_loss(s_feat, t_feat)
+            s_norm = F.normalize(s_feat, p=2, dim=1, eps=1e-6)
+            t_norm = F.normalize(t_feat, p=2, dim=1, eps=1e-6)
+            return F.mse_loss(s_norm, t_norm)
         
         elif loss_type == 'cosine':
             # Spatial cosine similarity (preserves spatial structure)
@@ -424,8 +601,8 @@ class DistillationLightningModule(L.LightningModule):
             t_reshaped = t_feat.flatten(2).transpose(1, 2)  # [B, H*W, C]
             
             # Normalize features (L2 normalization per spatial location)
-            s_norm = F.normalize(s_reshaped, p=2, dim=2)  # [B, H*W, C]
-            t_norm = F.normalize(t_reshaped, p=2, dim=2)  # [B, H*W, C]
+            s_norm = F.normalize(s_reshaped, p=2, dim=2, eps=1e-6)  # [B, H*W, C]
+            t_norm = F.normalize(t_reshaped, p=2, dim=2, eps=1e-6)  # [B, H*W, C]
             
             # Compute cosine similarity at each spatial location
             # Einstein sum: batch, spatial, channels -> batch, spatial
@@ -516,6 +693,26 @@ class DistillationLightningModule(L.LightningModule):
         
         # Average across features
         total_loss = total_loss / len(student_features)
+
+        # Optional Gram loss with epoch schedule
+        gram_active = self._is_gram_loss_active(self.current_epoch)
+        loss_dict['gram_active'] = torch.tensor(float(gram_active), device=total_loss.device)
+        if gram_active and self.gram_loss_fn is not None and self.gram_loss_weight > 0:
+            gram_loss = 0.0
+            for s_feat, t_feat in zip(student_features, teacher_features):
+                s_for_gram = self._prepare_gram_features(s_feat)
+                t_for_gram = self._prepare_gram_features(t_feat)
+                gram_loss = gram_loss + self.gram_loss_fn(
+                    s_for_gram,
+                    t_for_gram,
+                    img_level=self.gram_loss_img_level,
+                )
+            gram_loss = gram_loss / len(student_features)
+            gram_loss_weighted = gram_loss * self.gram_loss_weight
+            total_loss = total_loss + gram_loss_weighted
+
+            loss_dict['gram'] = gram_loss.detach()
+            loss_dict['gram_weighted'] = gram_loss_weighted.detach()
         
         # Add total to dict
         loss_dict['total'] = total_loss
@@ -827,6 +1024,23 @@ class DistillationLightningModule(L.LightningModule):
                     eta_min=min_lr
                 )
         
+        elif scheduler_name in ['sgdr', 'cosine_restarts']:
+            warmup_epochs = scheduler_cfg.get('warmup_epochs', 0)
+            warmup_start_factor = scheduler_cfg.get('warmup_start_factor', 1e-3)
+            min_lr = scheduler_cfg.get('min_lr', 0.0)
+            restart_lr_decay = scheduler_cfg.get('restart_lr_decay', 1.0)
+            restart_epochs = sorted(self.image_size_schedule.keys())
+
+            scheduler = ImageSizeSGDRScheduler(
+                optimizer=optimizer,
+                restart_epochs=restart_epochs,
+                max_epochs=max_epochs,
+                min_lr=min_lr,
+                warmup_epochs=warmup_epochs,
+                warmup_start_factor=warmup_start_factor,
+                restart_lr_decay=restart_lr_decay,
+            )
+
         elif scheduler_name == 'step':
             from torch.optim.lr_scheduler import StepLR
             step_size = scheduler_cfg.get('step_size', 30)

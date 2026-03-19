@@ -143,6 +143,60 @@ class SA1BDataset(Dataset):
                 if hflip_config.get('enabled', True):
                     p = hflip_config.get('p', 0.5)
                     transform_list.append(transforms.RandomHorizontalFlip(p=p))
+
+                # Color Jitter
+                color_jitter_config = aug_config.get('color_jitter', {})
+                if color_jitter_config.get('enabled', False):
+                    p = color_jitter_config.get('p', 0.8)
+                    brightness = color_jitter_config.get('brightness', 0.8)
+                    contrast = color_jitter_config.get('contrast', 0.8)
+                    saturation = color_jitter_config.get('saturation', 0.8)
+                    hue = color_jitter_config.get('hue', 0.2)
+
+                    transform_list.append(
+                        transforms.RandomApply(
+                            [
+                                transforms.ColorJitter(
+                                    brightness=brightness,
+                                    contrast=contrast,
+                                    saturation=saturation,
+                                    hue=hue,
+                                )
+                            ],
+                            p=p,
+                        )
+                    )
+
+                # Gaussian Blur
+                blur_config = aug_config.get('gaussian_blur', {})
+                if blur_config.get('enabled', False):
+                    p = blur_config.get('p', 0.1)
+                    kernel_size = blur_config.get('kernel_size', 23)
+                    sigma = blur_config.get('sigma', [0.1, 2.0])
+
+                    if isinstance(kernel_size, list):
+                        kernel_size = tuple(kernel_size)
+                    if isinstance(sigma, list):
+                        sigma = tuple(sigma)
+
+                    transform_list.append(
+                        transforms.RandomApply(
+                            [transforms.GaussianBlur(kernel_size=kernel_size, sigma=sigma)],
+                            p=p,
+                        )
+                    )
+
+                # Solarization
+                solarization_config = aug_config.get('solarization', {})
+                if solarization_config.get('enabled', False):
+                    p = solarization_config.get('p', 0.2)
+                    threshold = solarization_config.get('threshold', 128)
+                    transform_list.append(
+                        transforms.RandomApply(
+                            [transforms.RandomSolarize(threshold=threshold, p=1.0)],
+                            p=p,
+                        )
+                    )
             else:
                 # Augmentation disabled - use simple random crop
                 transform_list.append(transforms.RandomResizedCrop(image_size))

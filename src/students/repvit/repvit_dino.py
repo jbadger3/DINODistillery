@@ -8,8 +8,14 @@ REPVIT_DINO_MODELS = {
     'repvit_m1_1_dino': {
         'backbone_name': 'repvit_m1_1.dist_300e_in1k',
         'adapter_dim': 1024,
+    },
+    'repvit_m1_vit_small_plus': {
+        'backbone_name': 'repvit_m1.dist_in1k',
+        'adapter_dim': 0,
     }
 }
+
+
 
 class RepVitDINO(nn.Module):
     """

@@ -5,14 +5,14 @@ student:
   adapter_type: "basic"
   out_feature_indexes: [3]  # List of layer indexes to extract features from
 teacher:
-  model: "convnext_base"  # Model architecture from backbone_registry.py
+  model: "vit_base"  # Model architecture from backbone_registry.py
   out_feature_indexes: [3]  # List of layer indexes to extract features from
 
 # Training Configuration
 training:
-  max_epochs: 400             # Feature distillation: 50-150 epochs (typically faster than KD-only)
-  batch_size: 64             # Adjust based on GPU memory (64-256 typical)
-  accumulate_grad_batches: 1  # Number of batches to accumulate gradients before optimizer step
+  max_epochs: 20             # Feature distillation: 50-150 epochs (typically faster than KD-only)
+  batch_size: 2             # Adjust based on GPU memory (64-256 typical)
+  accumulate_grad_batches: 4  # Number of batches to accumulate gradients before optimizer step
                               # Effective batch size = batch_size * accumulate_grad_batches
                               # Use higher values (2, 4, 8) to simulate larger batches with limited GPU memory
   
@@ -20,8 +20,10 @@ training:
   # Option 1: Single size (fixed throughout training)
   image_size: 
     0: 224
-    300: 512
-    350: 768
+    15: 512
+    18: 768
+    #100: 512
+    #150: 768
 
   # Option 2: Progressive sizes - map epoch numbers to image sizes
   # image_size:
@@ -50,9 +52,12 @@ training:
   
   # Learning Rate Scheduler
   scheduler:
-    name: "cosine"            # cosine, step, polynomial, exponential
+    name: "sgdr"              # cosine, sgdr (or cosine_restarts), step, polynomial, exponential
     warmup_epochs: 5          # Linear warmup epochs (5-10 typical)
+    warmup_start_factor: 1.0e-3  # Initial LR factor during warmup (used by cosine/sgdr)
     min_lr: 1.0e-6            # Minimum learning rate for cosine annealing
+                              # For sgdr/cosine_restarts, restarts happen automatically at training.image_size epoch milestones
+    restart_lr_decay: 0.90    # SGDR only: multiply peak LR by this factor at each restart
     # Step scheduler parameters (if using step)
     step_size: 30             # Epochs between LR drops
     gamma: 0.1                # LR multiplication factor
@@ -83,6 +88,11 @@ data:
   dataset: "sa1b"              # Dataset type: "sa1b" for Segment Anything 1B
   root_dir: "datasets/sa-1b"  # Root directory containing SA-1B-Part-* directories
   val_size: 2500              # Number of images in validation set
+    # Dual-view mode (student and teacher receive separate transformed tensors)
+  dual_views: true            # true => dataloader returns (student_image, teacher_image)
+  student_resize_factor: 2.0   #double student size (1/32) to match teacher (1/16)
+  teacher_resize_factor: 1.0   # teacher_size = training.image_size * teacher_resize_factor
+  sync_student_teacher_augs: true  # Keep stochastic augs identical across views (crop/flip); size can differ
   
   # Augmentation settings for training
   augmentation:
@@ -99,12 +109,12 @@ data:
       p: 0.5                   # Probability of applying horizontal flip
   
   # Optional: limit datasets for testing (null = use all data)
-  #train_limit: 400            # Limit training images for quick testing
-  #val_limit: 20              # Limit validation images for quick testing
+  train_limit: 30            # Limit training images for quick testing
+  val_limit: 20              # Limit validation images for quick testing
 
 # Evaluation Configuration
 evaluation:
-  eval_every_n_epochs: 10       # Run validation every N epochs
+  eval_every_n_epochs: 20       # Run validation every N epochs
 
 # Early Stopping Configuration
 early_stopping:
@@ -117,7 +127,7 @@ early_stopping:
 
 # Logging Configuration
 logging:
-  experiment_name: "repvit_m1_1"
+  experiment_name: "repvit_m1_1_vit_base"
                               # Structure: outputs/{experiment_name}/
                               #   - checkpoints/  (model checkpoints)
                               #   - logs/         (tensorboard logs)
