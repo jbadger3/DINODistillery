@@ -34,7 +34,7 @@ training:
   
   # Learning Rate Scheduler
   scheduler:
-    name: "cosine"            # cosine, sgdr (or cosine_restarts), step, polynomial, exponential
+    name: "cosine"            # cosine, sgdr (or cosine_restarts), step, polynomial, exponential, constant
     warmup_epochs: 5          # Linear warmup epochs (5-10 typical)
     warmup_start_factor: 1.0e-3  # Initial LR factor during warmup (used by cosine/sgdr)
     min_lr: 1.0e-6            # Minimum learning rate for cosine annealing
@@ -146,3 +146,4 @@ logging:
   save_top_k: 3               # Save top K checkpoints
   checkpoint_monitor: "val_loss"  # Metric to use for checkpoint saving
   checkpoint_mode: "min"      # min or max
+  val_image_log_max_images: 2  # Number of samples from first val batch to visualize per epoch

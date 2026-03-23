@@ -94,7 +94,7 @@ def _get_student_adapter_weights(student_module: nn.Module) -> Tuple[bool, Optio
     if len(adapters) == 0:
         raise ValueError("Student has no channel adapters to export.")
 
-    adapter = adapters[0]
+    adapter = adapters[-1]
     if isinstance(adapter, nn.Identity):
         return False, None
 

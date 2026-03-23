@@ -3,6 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
 import math
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-GUI backend for thread-safe figure rendering
+import matplotlib.pyplot as plt
 from typing import Dict, List, Optional, Any
 from torch.utils.data import DataLoader
 import timm
@@ -14,6 +18,7 @@ from dinov3.backbone_registry import VIT_MODELS, VIT_MODELS_QKVB, CONVNEXT_MODEL
 from dinov3.dino_vit import DINOViT
 from dinov3.dino_convnext import DINOConvNeXt
 from students.repvit.repvit_registry import REPVIT_MODELS
+from utils.rgb_maps_for_features import rgb_pca_maps_for_features
 import sys
 
 
@@ -371,6 +376,91 @@ class DistillationLightningModule(L.LightningModule):
         self.student_resize_factor = float(data_cfg.get('student_resize_factor', 1.0))
         self.teacher_resize_factor = float(data_cfg.get('teacher_resize_factor', 1.0))
         self.image_size_schedule = self._parse_image_size_config(training_size_cfg)
+
+    def _to_display_rgb(self, image_tensor: torch.Tensor) -> np.ndarray:
+        """Convert normalized CHW image tensor to display-ready HWC RGB numpy array."""
+        image_tensor = image_tensor.detach().float().cpu().clamp(-10, 10)
+
+        # Reverse ImageNet normalization used by dataloader transforms.
+        mean = torch.tensor([0.485, 0.456, 0.406], dtype=image_tensor.dtype).view(3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], dtype=image_tensor.dtype).view(3, 1, 1)
+        image_tensor = image_tensor * std + mean
+        image_tensor = image_tensor.clamp(0.0, 1.0)
+        return image_tensor.permute(1, 2, 0).numpy()
+
+    def _get_tensorboard_experiment(self):
+        """Get a TensorBoard-like experiment writer with add_image support."""
+        if self.logger is None:
+            return None
+
+        experiment = getattr(self.logger, 'experiment', None)
+        if experiment is not None and hasattr(experiment, 'add_image'):
+            return experiment
+
+        logger_collection = getattr(self.logger, 'loggers', None)
+        if logger_collection is not None:
+            for logger in logger_collection:
+                exp = getattr(logger, 'experiment', None)
+                if exp is not None and hasattr(exp, 'add_image'):
+                    return exp
+        return None
+
+    def _log_validation_feature_visualization(
+        self,
+        student_images: torch.Tensor,
+        student_features: List[torch.Tensor],
+        teacher_features: List[torch.Tensor],
+    ) -> None:
+        """Render and log PCA RGB visualizations for validation features to TensorBoard."""
+        experiment = self._get_tensorboard_experiment()
+        if experiment is None:
+            return
+
+        max_images_to_log = int(self.config.get('logging', {}).get('val_image_log_max_images', 2))
+        max_images_to_log = max(1, min(max_images_to_log, int(student_images.shape[0])))
+        feature_indices = self.student_feature_indexes if self.student_feature_indexes else list(range(len(student_features)))
+
+        for feat_list_idx, (s_feat, t_feat) in enumerate(zip(student_features, teacher_features)):
+            #Match spatial size for side-by-side visualization consistency.
+            if s_feat.shape[2:] != t_feat.shape[2:]:
+                t_feat = F.interpolate(t_feat, size=s_feat.shape[2:], mode='bilinear', align_corners=False)
+            student_rgb_maps, teacher_rgb_maps = rgb_pca_maps_for_features(s_feat, t_feat)
+            student_rgb_maps = student_rgb_maps.detach().cpu()
+            teacher_rgb_maps = teacher_rgb_maps.detach().cpu()
+
+            layer_idx = feature_indices[feat_list_idx] if feat_list_idx < len(feature_indices) else feat_list_idx
+            for img_idx in range(max_images_to_log):
+                original_rgb = self._to_display_rgb(student_images[img_idx])
+                teacher_rgb = teacher_rgb_maps[img_idx].numpy()
+                student_rgb = student_rgb_maps[img_idx].numpy()
+
+                fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+                axes[0].imshow(original_rgb)
+                axes[0].set_title(f'Original - Epoch {self.current_epoch}')
+                axes[0].axis('off')
+
+                axes[1].imshow(teacher_rgb)
+                axes[1].set_title(f'Teacher PCA RGB - Epoch {self.current_epoch}')
+                axes[1].axis('off')
+
+                axes[2].imshow(student_rgb)
+                axes[2].set_title(f'Student PCA RGB - Epoch {self.current_epoch}')
+                axes[2].axis('off')
+
+                fig.suptitle(
+                    f'Validation Feature Visualization | Epoch {self.current_epoch} | Layer {layer_idx} | Sample {img_idx}',
+                    fontsize=11,
+                )
+                fig.tight_layout()
+
+                fig.canvas.draw()
+
+                experiment.add_figure(
+                    f'val_images/layer_{layer_idx}/sample_{img_idx}',
+                    fig,
+                    global_step=self.global_step,
+                )
+                plt.close(fig)
     
     def _parse_loss_config(self, distillation_config: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Parse loss configuration from distillation config.
@@ -586,6 +676,10 @@ class DistillationLightningModule(L.LightningModule):
         Returns:
             Loss value
         """
+        #First resize the teacher spatial dimension to match the student if needed
+        if s_feat.shape[2:] != t_feat.shape[2:]:
+            t_feat = F.interpolate(t_feat, size=s_feat.shape[2:], mode='bilinear', align_corners=False)
+
         if loss_type == 'mse':
             s_norm = F.normalize(s_feat, p=2, dim=1, eps=1e-6)
             t_norm = F.normalize(t_feat, p=2, dim=1, eps=1e-6)
@@ -700,6 +794,8 @@ class DistillationLightningModule(L.LightningModule):
         if gram_active and self.gram_loss_fn is not None and self.gram_loss_weight > 0:
             gram_loss = 0.0
             for s_feat, t_feat in zip(student_features, teacher_features):
+                if s_feat.shape[2:] != t_feat.shape[2:]:
+                    t_feat = F.interpolate(t_feat, size=s_feat.shape[2:], mode='bilinear', align_corners=False)
                 s_for_gram = self._prepare_gram_features(s_feat)
                 t_for_gram = self._prepare_gram_features(t_feat)
                 gram_loss = gram_loss + self.gram_loss_fn(
@@ -822,6 +918,17 @@ class DistillationLightningModule(L.LightningModule):
             if key != 'total':
                 self.log(f'train_{key}_loss' if not key.startswith('loss_') else f'train_{key}', 
                         value, on_step=False, on_epoch=True, prog_bar=False)
+
+        # Log learning rates once per epoch (from the first training batch).
+        if batch_idx == 0 and self.trainer is not None and len(self.trainer.optimizers) > 0:
+            optimizer = self.trainer.optimizers[0]
+            lrs = [group['lr'] for group in optimizer.param_groups]
+            if len(lrs) > 0:
+                self.log('lr', lrs[0], on_step=False, on_epoch=True, prog_bar=False)
+                self.log('lr/min', min(lrs), on_step=False, on_epoch=True, prog_bar=False)
+                self.log('lr/max', max(lrs), on_step=False, on_epoch=True, prog_bar=False)
+                for group_idx, lr_value in enumerate(lrs):
+                    self.log(f'lr/group_{group_idx}', lr_value, on_step=False, on_epoch=True, prog_bar=False)
         
         return loss_dict['total']
     
@@ -851,6 +958,16 @@ class DistillationLightningModule(L.LightningModule):
         # Get teacher features (no gradient)
         with torch.no_grad():
             teacher_features = self.teacher(teacher_images)
+
+        # Log feature visualizations once per validation epoch.
+        if batch_idx == 0:
+            student_features_list_for_viz = list(student_features) if isinstance(student_features, (list, tuple)) else [student_features]
+            teacher_features_list_for_viz = list(teacher_features) if isinstance(teacher_features, (list, tuple)) else [teacher_features]
+            self._log_validation_feature_visualization(
+                student_images=student_images,
+                student_features=student_features_list_for_viz,
+                teacher_features=teacher_features_list_for_viz,
+            )
         
         # Compute distillation loss (returns dict)
         loss_dict = self.compute_distillation_loss(student_features, teacher_features)
@@ -1056,6 +1173,36 @@ class DistillationLightningModule(L.LightningModule):
             from torch.optim.lr_scheduler import ExponentialLR
             gamma = scheduler_cfg.get('gamma', 0.95)
             scheduler = ExponentialLR(optimizer, gamma=gamma)
+        
+        elif scheduler_name == 'constant':
+            warmup_epochs = scheduler_cfg.get('warmup_epochs', 0)
+            warmup_start_factor = scheduler_cfg.get('warmup_start_factor', 1e-3)
+            
+            if warmup_epochs > 0:
+                # Warmup followed by constant learning rate
+                from torch.optim.lr_scheduler import LinearLR, ConstantLR, SequentialLR
+                
+                # Warmup phase
+                warmup_scheduler = LinearLR(
+                    optimizer,
+                    start_factor=warmup_start_factor,
+                    end_factor=1.0,
+                    total_iters=warmup_epochs
+                )
+                
+                # Constant LR phase
+                constant_scheduler = ConstantLR(optimizer, factor=1.0)
+                
+                # Combine them
+                scheduler = SequentialLR(
+                    optimizer,
+                    schedulers=[warmup_scheduler, constant_scheduler],
+                    milestones=[warmup_epochs]
+                )
+            else:
+                # Just constant learning rate (no warmup)
+                from torch.optim.lr_scheduler import ConstantLR
+                scheduler = ConstantLR(optimizer, factor=1.0)
         
         else:
             raise ValueError(f"Unknown scheduler: {scheduler_name}")

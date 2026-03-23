@@ -94,7 +94,7 @@ def setup_callbacks(config: dict, experiment_dir: str):
             filename='recovery-epoch{epoch:03d}',
             monitor=None,
             mode='min',
-            save_top_k=0,
+            save_top_k=1,
             every_n_epochs=recovery_cfg.get('every_n_epochs', 1),
             save_on_train_epoch_end=True,
             save_last=True,

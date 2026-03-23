@@ -10,11 +10,9 @@ teacher:
 
 # Training Configuration
 training:
-  #max_epochs: 150             # Feature distillation: 50-150 epochs (typically faster than KD-only)
-  #batch_size: 40             # Adjust based on GPU memory (64-256 typical)
-  max_epochs: 400
-  batch_size: 8             # Adjust based on GPU memory (64-256 typical)
-  accumulate_grad_batches: 16  # Number of batches to accumulate gradients before optimizer step
+  max_epochs: 400             # Feature distillation: 50-150 epochs (typically faster than KD-only)
+  batch_size: 40             # Adjust based on GPU memory (64-256 typical)
+  accumulate_grad_batches: 32  # Number of batches to accumulate gradients before optimizer step
                               # Effective batch size = batch_size * accumulate_grad_batches
                               # Use higher values (2, 4, 8) to simulate larger batches with limited GPU memory
   
@@ -23,8 +21,9 @@ training:
   image_size:
     0: 256
 
+
   # Option 2: Progressive sizes - map epoch numbers to image sizes
-  # image_size: 
+  # image_size:
   #   0: 224      # Epochs 0-49: use 224x224
   #   50: 384     # Epochs 50+: use 384x384
   
@@ -50,7 +49,7 @@ training:
   
   # Learning Rate Scheduler
   scheduler:
-    name: "constant"              # cosine, sgdr (or cosine_restarts), step, polynomial, exponential, constant
+    name: "constant"              # cosine, sgdr (or cosine_restarts), step, polynomial, exponential
     warmup_epochs: 5          # Linear warmup epochs (5-10 typical)
     warmup_start_factor: 1.0e-6  # Initial LR factor during warmup (used by cosine/sgdr)
     min_lr: 1.0e-4            # Minimum learning rate for cosine annealing
@@ -70,7 +69,7 @@ distillation:
   feature_weight: 1.0         # Overall weight for feature matching loss
   stage_loss_weights: null      # Weights for each feature stage
   gram_loss:
-    enabled: false
+    enabled: true
     weight: 1.0
     img_level: true
     apply_norm: true
@@ -96,39 +95,39 @@ data:
     enabled: true              # Use data augmentation for training
     
     # Random Resized Crop (always applied if augmentation enabled)
-    #random_resized_crop:
-    #  scale: [0.5, 1.0]        # Scale range for random crop (min, max)
-    #  ratio: [0.75, 1.333]     # Aspect ratio range (3/4 to 4/3)
+    random_resized_crop:
+      scale: [0.5, 1.0]        # Scale range for random crop (min, max)
+      ratio: [0.75, 1.333]     # Aspect ratio range (3/4 to 4/3)
     
     # Horizontal Flip
-    #horizontal_flip:
-    #  enabled: true
-    #  p: 0.5                   # Probability of applying horizontal flip
+    horizontal_flip:
+      enabled: true
+      p: 0.5                   # Probability of applying horizontal flip
 
     # Aggressive Color Jitter
-    #color_jitter:
-    #  enabled: true
-    #  p: 0.8                   # Probability of applying color jitter
-    #  brightness: 0.8
-    #  contrast: 0.8
-    #  saturation: 0.8
-    #  hue: 0.2
+    color_jitter:
+      enabled: true
+      p: 0.8                   # Probability of applying color jitter
+      brightness: 0.8
+      contrast: 0.8
+      saturation: 0.8
+      hue: 0.2
 
     # Gaussian Blur
-    #gaussian_blur:
-    #  enabled: true
-    #  p: 0.1                   # Probability of applying gaussian blur
-    #  kernel_size: 23          # Must be odd; can also be [k_h, k_w]
-    #  sigma: [0.1, 2.0]        # Blur sigma range
+    gaussian_blur:
+      enabled: true
+      p: 0.1                   # Probability of applying gaussian blur
+      kernel_size: 23          # Must be odd; can also be [k_h, k_w]
+      sigma: [0.1, 2.0]        # Blur sigma range
 
     # Solarization
-    #solarization:
-    #  enabled: true
-    #  p: 0.2                   # Probability of applying solarization
-    #  threshold: 128           # Solarize threshold for PIL images
+    solarization:
+      enabled: true
+      p: 0.2                   # Probability of applying solarization
+      threshold: 128           # Solarize threshold for PIL images
   
   # Optional: limit datasets for testing (null = use all data)
-  train_limit: 200            # Limit training images for quick testing
+  train_limit: 300            # Limit training images for quick testing
   val_limit: 70              # Limit validation images for quick testing
 
 # Evaluation Configuration
@@ -146,7 +145,7 @@ early_stopping:
 
 # Logging Configuration
 logging:
-  experiment_name: "repvit_m1_vit_small_plus_test"
+  experiment_name: "repvit_m1_vit_small_plus"
                               # Structure: outputs/{experiment_name}/
                               #   - checkpoints/  (model checkpoints)
                               #   - logs/         (tensorboard logs)
