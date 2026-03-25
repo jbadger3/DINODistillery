@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import torch
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
@@ -25,7 +26,62 @@ def parse_args():
                        help='Path to configuration file')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
+    parser.add_argument('--model', type=str, default=None,
+                       help='Path to .pth file with initial student weights')
     return parser.parse_args()
+
+
+def _extract_state_dict(checkpoint_obj):
+    """Extract a state_dict from common checkpoint formats."""
+    if not isinstance(checkpoint_obj, dict):
+        return checkpoint_obj
+
+    if 'state_dict' in checkpoint_obj and isinstance(checkpoint_obj['state_dict'], dict):
+        return checkpoint_obj['state_dict']
+
+    for key in ('model', 'model_state_dict', 'student_state_dict'):
+        if key in checkpoint_obj and isinstance(checkpoint_obj[key], dict):
+            return checkpoint_obj[key]
+
+    return checkpoint_obj
+
+
+def _load_student_weights(model: DistillationLightningModule, model_path: str):
+    """Load initial student weights from a .pth file into the student backbone."""
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+
+    checkpoint = torch.load(model_path, map_location='cpu')
+    state_dict = _extract_state_dict(checkpoint)
+    if not isinstance(state_dict, dict):
+        raise ValueError(f"Unsupported .pth format at: {model_path}")
+
+    keys = list(state_dict.keys())
+    if not keys:
+        raise ValueError(f"Empty state_dict in model file: {model_path}")
+
+    # Support multiple key formats without requiring file conversion.
+    if any(k.startswith('student.model.') for k in keys):
+        remapped = {k.replace('student.model.', '', 1): v for k, v in state_dict.items() if k.startswith('student.model.')}
+        target = model.student.model
+    elif any(k.startswith('student.') for k in keys):
+        remapped = {k.replace('student.', '', 1): v for k, v in state_dict.items() if k.startswith('student.')}
+        target = model.student
+    elif any(k.startswith('backbone.') for k in keys):
+        remapped = {k.replace('backbone.', '', 1): v for k, v in state_dict.items() if k.startswith('backbone.')}
+        target = model.student.model
+    else:
+        remapped = state_dict
+        target = model.student.model
+
+    missing, unexpected = target.load_state_dict(remapped, strict=False)
+    print(f"Loaded initial student weights from: {model_path}")
+    print(f"  - Missing keys: {len(missing)}")
+    print(f"  - Unexpected keys: {len(unexpected)}")
+    if missing:
+        print(f"  - Missing (first 10): {missing[:10]}")
+    if unexpected:
+        print(f"  - Unexpected (first 10): {unexpected[:10]}")
 
 
 def setup_callbacks(config: dict, experiment_dir: str):
@@ -141,6 +197,11 @@ def main():
     # Create lightning module
     print("\nCreating distillation module...")
     model = DistillationLightningModule(config)
+    if args.model is not None:
+        if args.resume is not None:
+            print("WARNING: Both --model and --resume were provided. --resume checkpoint weights take precedence during trainer.fit().")
+        print(f"Loading initial weights from model file: {args.model}")
+        _load_student_weights(model, args.model)
     
     # Setup logger (logs go in experiment_dir/logs/)
     logger = TensorBoardLogger(
