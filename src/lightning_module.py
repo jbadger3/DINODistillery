@@ -481,9 +481,15 @@ class DistillationLightningModule(L.LightningModule):
         total_weight = sum(loss['weight'] for loss in losses)
         normalized_losses = []
         for loss in losses:
+            temperature = float(loss.get('temperature', 1.0))
+            if temperature <= 0:
+                raise ValueError(
+                    f"distillation.losses[{loss.get('type', 'unknown')}].temperature must be > 0"
+                )
             normalized_losses.append({
                 'type': loss['type'],
-                'weight': loss['weight'] / total_weight
+                'weight': loss['weight'] / total_weight,
+                'temperature': temperature,
             })
         return normalized_losses
     
@@ -665,13 +671,13 @@ class DistillationLightningModule(L.LightningModule):
         """
         return self.student(x)
     
-    def _compute_single_loss(self, s_feat: torch.Tensor, t_feat: torch.Tensor, loss_type: str) -> torch.Tensor:
+    def _compute_single_loss(self, s_feat: torch.Tensor, t_feat: torch.Tensor, loss_cfg: Dict[str, Any]) -> torch.Tensor:
         """Compute a single loss between student and teacher feature.
         
         Args:
             s_feat: Student feature tensor [B, C, H, W]
             t_feat: Teacher feature tensor [B, C, H, W]
-            loss_type: Type of loss to compute
+            loss_cfg: Loss configuration including type and optional temperature
             
         Returns:
             Loss value
@@ -679,6 +685,9 @@ class DistillationLightningModule(L.LightningModule):
         #First resize the teacher spatial dimension to match the student if needed
         if s_feat.shape[2:] != t_feat.shape[2:]:
             t_feat = F.interpolate(t_feat, size=s_feat.shape[2:], mode='bilinear', align_corners=False)
+
+        loss_type = loss_cfg['type']
+        temperature = float(loss_cfg.get('temperature', 1.0))
 
         if loss_type == 'mse':
             s_norm = F.normalize(s_feat, p=2, dim=1, eps=1e-6)
@@ -704,13 +713,26 @@ class DistillationLightningModule(L.LightningModule):
             
             # Loss is 1 - mean(cosine_similarity)
             # Average over spatial locations and batch
-            return 1.0 - cosine_sim.mean()
+            # Optional temperature scaling: lower temperatures amplify gradients.
+            return (1.0 - cosine_sim.mean()) / temperature
         
         elif loss_type == 'cosine_global':
             # Global pooling version (alternative option)
             s_flat = s_feat.flatten(2).mean(dim=2)  # [B, C]
             t_flat = t_feat.flatten(2).mean(dim=2)  # [B, C]
-            return 1.0 - F.cosine_similarity(s_flat, t_flat, dim=1).mean()
+            return (1.0 - F.cosine_similarity(s_flat, t_flat, dim=1).mean()) / temperature
+
+        elif loss_type == 'exp_cosine':
+            # Exponential cosine variant:
+            # L = 1 - exp(tau * cos(S, T) - 1)
+            s_reshaped = s_feat.flatten(2).transpose(1, 2)  # [B, H*W, C]
+            t_reshaped = t_feat.flatten(2).transpose(1, 2)  # [B, H*W, C]
+
+            s_norm = F.normalize(s_reshaped, p=2, dim=2, eps=1e-6)
+            t_norm = F.normalize(t_reshaped, p=2, dim=2, eps=1e-6)
+
+            cosine_sim = torch.einsum('bpc,bpc->bp', s_norm, t_norm)  # [B, H*W]
+            return 1.0 - torch.exp(temperature * cosine_sim - 1.0).mean()
         
         elif loss_type == 'kl_div':
             # Apply softmax with temperature
@@ -760,7 +782,7 @@ class DistillationLightningModule(L.LightningModule):
                 loss_weight = loss_cfg['weight']
                 
                 # Compute single loss
-                single_loss = self._compute_single_loss(s_feat, t_feat, loss_type)
+                single_loss = self._compute_single_loss(s_feat, t_feat, loss_cfg)
                 
                 # Weight and accumulate
                 weighted_loss = single_loss * loss_weight
