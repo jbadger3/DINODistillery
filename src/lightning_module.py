@@ -951,62 +951,60 @@ class DistillationLightningModule(L.LightningModule):
             batch_idx: Batch index
         """
         student_images, teacher_images = self._unpack_student_teacher_images(batch)
-        
-        # Get student features
-        student_features = self.student(student_images)
-        
-        # Get teacher features (no gradient)
+
         with torch.no_grad():
+            # Validation does not require autograd; keep the full path graph-free.
+            student_features = self.student(student_images)
             teacher_features = self.teacher(teacher_images)
 
-        # Log feature visualizations once per validation epoch.
-        if batch_idx == 0:
-            student_features_list_for_viz = list(student_features) if isinstance(student_features, (list, tuple)) else [student_features]
-            teacher_features_list_for_viz = list(teacher_features) if isinstance(teacher_features, (list, tuple)) else [teacher_features]
-            self._log_validation_feature_visualization(
-                student_images=student_images,
-                student_features=student_features_list_for_viz,
-                teacher_features=teacher_features_list_for_viz,
-            )
-        
-        # Compute distillation loss (returns dict)
-        loss_dict = self.compute_distillation_loss(student_features, teacher_features)
-        
-        # Log all metrics
-        self.log('val_loss', loss_dict['total'], on_step=False, on_epoch=True, prog_bar=True)
-        
-        # Log individual feature losses and loss components
-        for key, value in loss_dict.items():
-            if key != 'total':
-                self.log(f'val_{key}_loss' if not key.startswith('loss_') else f'val_{key}', 
-                        value, on_step=False, on_epoch=True, prog_bar=False)
-        
-        # Calculate and log angular spread for feature diversity monitoring
-        # Handle single tensor outputs (convert to list) - make copies for iteration
-        student_features_list = list(student_features) if isinstance(student_features, (list, tuple)) else [student_features]
-        teacher_features_list = list(teacher_features) if isinstance(teacher_features, (list, tuple)) else [teacher_features]
-        
-        # Get actual feature indices for logging (use list index if indices not specified)
-        feature_indices = self.student_feature_indexes if self.student_feature_indexes else list(range(len(student_features_list)))
-        
-        for list_idx, (s_feat, t_feat) in enumerate(zip(student_features_list, teacher_features_list)):
-            # Use actual layer index for logging
-            layer_idx = feature_indices[list_idx] if list_idx < len(feature_indices) else list_idx
-            
-            # Calculate angular spread for student features
-            student_spread = self._calculate_angular_spread(s_feat)
-            self.log(f'val_angular_spread/student_feat_{layer_idx}', student_spread.item(), 
-                    on_step=True, on_epoch=True, prog_bar=False)
-            
-            # Calculate angular spread for teacher features
-            teacher_spread = self._calculate_angular_spread(t_feat)
-            self.log(f'val_angular_spread/teacher_feat_{layer_idx}', teacher_spread.item(), 
-                    on_step=True, on_epoch=True, prog_bar=False)
-            
-            # Calculate the difference (how well student matches teacher diversity)
-            spread_diff = torch.abs(student_spread - teacher_spread)
-            self.log(f'val_angular_spread/diff_feat_{layer_idx}', spread_diff.item(), 
-                    on_step=True, on_epoch=True, prog_bar=False)
+            # Log feature visualizations once per validation epoch.
+            if batch_idx == 0:
+                student_features_list_for_viz = list(student_features) if isinstance(student_features, (list, tuple)) else [student_features]
+                teacher_features_list_for_viz = list(teacher_features) if isinstance(teacher_features, (list, tuple)) else [teacher_features]
+                self._log_validation_feature_visualization(
+                    student_images=student_images,
+                    student_features=student_features_list_for_viz,
+                    teacher_features=teacher_features_list_for_viz,
+                )
+
+            # Compute distillation loss (returns dict)
+            loss_dict = self.compute_distillation_loss(student_features, teacher_features)
+
+            # Log all metrics
+            self.log('val_loss', loss_dict['total'], on_step=False, on_epoch=True, prog_bar=True)
+
+            # Log individual feature losses and loss components
+            for key, value in loss_dict.items():
+                if key != 'total':
+                    self.log(f'val_{key}_loss' if not key.startswith('loss_') else f'val_{key}', 
+                            value, on_step=False, on_epoch=True, prog_bar=False)
+
+            # Calculate and log angular spread for feature diversity monitoring
+            # Handle single tensor outputs (convert to list) - make copies for iteration
+            student_features_list = list(student_features) if isinstance(student_features, (list, tuple)) else [student_features]
+            teacher_features_list = list(teacher_features) if isinstance(teacher_features, (list, tuple)) else [teacher_features]
+
+            # Get actual feature indices for logging (use list index if indices not specified)
+            feature_indices = self.student_feature_indexes if self.student_feature_indexes else list(range(len(student_features_list)))
+
+            for list_idx, (s_feat, t_feat) in enumerate(zip(student_features_list, teacher_features_list)):
+                # Use actual layer index for logging
+                layer_idx = feature_indices[list_idx] if list_idx < len(feature_indices) else list_idx
+
+                # Calculate angular spread for student features
+                student_spread = self._calculate_angular_spread(s_feat)
+                self.log(f'val_angular_spread/student_feat_{layer_idx}', student_spread.item(), 
+                        on_step=True, on_epoch=True, prog_bar=False)
+
+                # Calculate angular spread for teacher features
+                teacher_spread = self._calculate_angular_spread(t_feat)
+                self.log(f'val_angular_spread/teacher_feat_{layer_idx}', teacher_spread.item(), 
+                        on_step=True, on_epoch=True, prog_bar=False)
+
+                # Calculate the difference (how well student matches teacher diversity)
+                spread_diff = torch.abs(student_spread - teacher_spread)
+                self.log(f'val_angular_spread/diff_feat_{layer_idx}', spread_diff.item(), 
+                        on_step=True, on_epoch=True, prog_bar=False)
     
     def configure_optimizers(self):
         """Configure optimizers and learning rate schedulers.
