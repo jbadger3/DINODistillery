@@ -12,7 +12,7 @@ teacher:
 training:
   max_epochs: 400             # Feature distillation: 50-150 epochs (typically faster than KD-only)
   batch_size: 40             # Adjust based on GPU memory (64-256 typical)
-  accumulate_grad_batches: 32  # Number of batches to accumulate gradients before optimizer step
+  accumulate_grad_batches: 6  # Number of batches to accumulate gradients before optimizer step
                               # Effective batch size = batch_size * accumulate_grad_batches
                               # Use higher values (2, 4, 8) to simulate larger batches with limited GPU memory
   
@@ -27,7 +27,7 @@ training:
   #   0: 224      # Epochs 0-49: use 224x224
   #   50: 384     # Epochs 50+: use 384x384
   
-  num_workers: 4
+  num_workers: 16
   accelerator: "cuda"          # gpu (CUDA/ROCm), mps (Apple Silicon), cpu, tpu
                               # Use "mps" for M1/M2/M3 Macs, "gpu" for NVIDIA/AMD
   devices: 1                  # Number of devices to use
@@ -69,7 +69,7 @@ distillation:
   feature_weight: 1.0         # Overall weight for feature matching loss
   stage_loss_weights: null      # Weights for each feature stage
   gram_loss:
-    enabled: true
+    enabled: false
     weight: 1.0
     img_level: true
     apply_norm: true
@@ -127,8 +127,8 @@ data:
       threshold: 128           # Solarize threshold for PIL images
   
   # Optional: limit datasets for testing (null = use all data)
-  train_limit: 300            # Limit training images for quick testing
-  val_limit: 70              # Limit validation images for quick testing
+  # train_limit: 300            # Limit training images for quick testing
+  # val_limit: 70              # Limit validation images for quick testing
 
 # Evaluation Configuration
 evaluation:
@@ -145,7 +145,7 @@ early_stopping:
 
 # Logging Configuration
 logging:
-  experiment_name: "repvit_m1_vit_small_plus"
+  experiment_name: "repvit_m1_vit_small_plus_stage_1"
                               # Structure: outputs/{experiment_name}/
                               #   - checkpoints/  (model checkpoints)
                               #   - logs/         (tensorboard logs)
