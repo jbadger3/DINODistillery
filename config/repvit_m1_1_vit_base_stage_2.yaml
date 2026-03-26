@@ -1,0 +1,159 @@
+# Teacher and Student Configurations
+student:
+  model: "repvit_m1_1"  # Model architecture see student registry files for options
+  pretrained: true         # Use pretrained weights
+  adapter_type: "basic"
+  out_feature_indexes: [3]  # List of layer indexes to extract features from
+teacher:
+  model: "vit_base"  # Model architecture from backbone_registry.py
+  out_feature_indexes: [11]  # List of layer indexes to extract features from
+
+# Training Configuration
+training:
+  max_epochs: 12             # Feature distillation: 50-150 epochs (typically faster than KD-only)
+  batch_size: 40             # Adjust based on GPU memory (64-256 typical)
+  accumulate_grad_batches: 6  # Number of batches to accumulate gradients before optimizer step
+                              # Effective batch size = batch_size * accumulate_grad_batches
+                              # Use higher values (2, 4, 8) to simulate larger batches with limited GPU memory
+  
+  # Image size - supports progressive training with different resolutions
+  # Option 1: Single size (fixed throughout training)
+  image_size:
+    0: 512
+
+
+  # Option 2: Progressive sizes - map epoch numbers to image sizes
+  # image_size:
+  #   0: 224      # Epochs 0-49: use 224x224
+  #   50: 384     # Epochs 50+: use 384x384
+  
+  num_workers: 16
+  accelerator: "cuda"          # gpu (CUDA/ROCm), mps (Apple Silicon), cpu, tpu
+                              # Use "mps" for M1/M2/M3 Macs, "gpu" for NVIDIA/AMD
+  devices: 1                  # Number of devices to use
+  precision: "bf16-mixed"             # "32", "16-mixed", "bf16-mixed", "64", "16-true", "bf16-true", "32-true"
+                              # "16-mixed" and "bf16-mixed" use automatic mixed precision (recommended)
+                              # "32" is full precision (default), "64" is double precision
+                              # Note: MPS currently works best with "32" or "bf16-mixed"
+  
+  # Optimizer Configuration
+  optimizer:
+    name: "adamw"             # adamw, adam, sgd
+    lr: 0.00001                # Base learning rate
+    weight_decay: 0.005        # AdamW typically uses higher weight decay (0.01-0.1)
+    momentum: 0.9             # For SGD
+    llrd_decay: 0.98          # Layer-wise Learning Rate Decay factor
+                              # Shallower layers get progressively lower LR
+                              # Stage i gets: base_lr * decay^(num_stages - i)
+                              # Set to 1.0 to disable LLRD (all stages same LR)
+  
+  # Learning Rate Scheduler
+  scheduler:
+    name: "cosine"              # cosine, sgdr (or cosine_restarts), step, polynomial, exponential
+    warmup_epochs: 1          # Linear warmup epochs (5-10 typical)
+    warmup_start_factor: 1.0e-7  # Initial LR factor during warmup (used by cosine/sgdr)
+    min_lr: 1.0e-7            # Minimum learning rate for cosine annealing
+                              # For sgdr/cosine_restarts, restarts happen automatically at training.image_size epoch milestones
+    restart_lr_decay: 0.9     # SGDR only: multiply peak LR by this factor at each restart (e.g., 0.8 => lower peak each cycle)
+    # Step scheduler parameters (if using step)
+    step_size: 30             # Epochs between LR drops
+    gamma: 0.1                # LR multiplication factor
+
+# Distillation Configuration
+distillation:
+  losses:                     # List of loss configurations with weights
+    - type: "exp_cosine"             # Example of adding a second loss with lower weight
+      weight: 1.0
+      temperature: 0.07           
+  # Feature loss weighting
+  feature_weight: 1.0         # Overall weight for feature matching loss
+  stage_loss_weights: null      # Weights for each feature stage
+  gram_loss:
+    enabled: false
+    weight: 1.0
+    img_level: true
+    apply_norm: true
+    remove_neg: true
+    remove_only_teacher_neg: false
+    epochs:
+      0: false
+      30: true
+
+# Data Configuration
+data:
+  dataset: "sa1b"              # Dataset type: "sa1b" for Segment Anything 1B
+  root_dir: "datasets/sa-1b"  # Root directory containing SA-1B-Part-* directories
+  val_size: 2500              # Number of images in validation set
+    # Dual-view mode (student and teacher receive separate transformed tensors)
+  dual_views: true            # true => dataloader returns (student_image, teacher_image)
+  student_resize_factor: 2.0   #double student size (1/32) to match teacher (1/16)
+  teacher_resize_factor: 1.0   # teacher_size = training.image_size * teacher_resize_factor
+  sync_student_teacher_augs: true  # Keep stochastic augs identical across views (crop/flip); size can differ
+  
+  # Augmentation settings for training
+  augmentation:
+    enabled: true              # Use data augmentation for training
+    
+    # Random Resized Crop (always applied if augmentation enabled)
+    random_resized_crop:
+      scale: [0.5, 1.0]        # Scale range for random crop (min, max)
+      ratio: [0.75, 1.333]     # Aspect ratio range (3/4 to 4/3)
+    
+    # Horizontal Flip
+    horizontal_flip:
+      enabled: true
+      p: 0.5                   # Probability of applying horizontal flip
+
+    # Aggressive Color Jitter
+    color_jitter:
+      enabled: true
+      p: 0.8                   # Probability of applying color jitter
+      brightness: 0.8
+      contrast: 0.8
+      saturation: 0.8
+      hue: 0.2
+
+    # Gaussian Blur
+    gaussian_blur:
+      enabled: true
+      p: 0.1                   # Probability of applying gaussian blur
+      kernel_size: 23          # Must be odd; can also be [k_h, k_w]
+      sigma: [0.1, 2.0]        # Blur sigma range
+
+    # Solarization
+    solarization:
+      enabled: true
+      p: 0.2                   # Probability of applying solarization
+      threshold: 128           # Solarize threshold for PIL images
+  
+  # Optional: limit datasets for testing (null = use all data)
+  # train_limit: 300            # Limit training images for quick testing
+  # val_limit: 70              # Limit validation images for quick testing
+
+# Evaluation Configuration
+evaluation:
+  eval_every_n_epochs: 1       # Run validation every N epochs
+
+# Early Stopping Configuration
+early_stopping:
+  enabled: false
+  monitor: "val_loss"         # Metric to monitor (val_loss, val_accuracy, etc.)
+  patience: 10                # Number of epochs to wait for improvement
+  mode: "min"                 # min (lower is better) or max (higher is better)
+  min_delta: 0.001            # Minimum change to qualify as improvement
+  verbose: true
+
+# Logging Configuration
+logging:
+  experiment_name: "repvit_m1_1_vit_base_stage_2"
+                              # Structure: outputs/{experiment_name}/
+                              #   - checkpoints/  (model checkpoints)
+                              #   - logs/         (tensorboard logs)
+  save_top_k: 3               # Save top K checkpoints
+  checkpoint_monitor: "val_loss"  # Metric to use for checkpoint saving
+  checkpoint_mode: "min"      # min or max
+  every_n_epochs: 5           # Used for non-val monitors; val_* monitors follow evaluation.eval_every_n_epochs
+  save_on_train_epoch_end: false  # For val_loss monitor, save at validation end
+  recovery_checkpoint:
+    enabled: true
+    every_n_epochs: 1         # Save a resumable checkpoint each train epoch
