@@ -353,13 +353,13 @@ class DistillationLightningModule(L.LightningModule):
             )
 
         self.spatial_matching_mode = str(
-            spatial_matching_cfg.get('name', 'parent2student')
+            spatial_matching_cfg.get('name', 'teacher2student')
         ).lower()
         self.feature_interpolate_mode = str(
             spatial_matching_cfg.get('feature_interpolate_mode', 'bilinear')
         ).lower()
 
-        valid_spatial_matching_modes = {'parent2student', 'student2parent'}
+        valid_spatial_matching_modes = {'teacher2student', 'student2teacher'}
         if self.spatial_matching_mode not in valid_spatial_matching_modes:
             raise ValueError(
                 "Unknown distillation.spatial_matching_mode.name: "
@@ -574,11 +574,11 @@ class DistillationLightningModule(L.LightningModule):
         teacher_feat: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return student/teacher features with aligned spatial shape per configured matching mode."""
-        if self.spatial_matching_mode == 'parent2student':
+        if self.spatial_matching_mode == 'teacher2student':
             teacher_feat = self._resize_teacher_to_student_spatial(teacher_feat, student_feat)
             return student_feat, teacher_feat
 
-        if self.spatial_matching_mode == 'student2parent':
+        if self.spatial_matching_mode == 'student2teacher':
             student_feat = self._resize_student_to_teacher(student_feat, teacher_feat)
             return student_feat, teacher_feat
 
