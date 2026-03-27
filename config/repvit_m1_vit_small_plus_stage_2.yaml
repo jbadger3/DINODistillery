@@ -39,8 +39,8 @@ training:
   # Optimizer Configuration
   optimizer:
     name: "adamw"             # adamw, adam, sgd
-    lr: 0.0005                # Base learning rate
-    weight_decay: 0.05        # AdamW typically uses higher weight decay (0.01-0.1)
+    lr: 0.00001                # Base learning rate
+    weight_decay: 0.00        # AdamW typically uses higher weight decay (0.01-0.1)
     momentum: 0.9             # For SGD
     llrd_decay: 0.98          # Layer-wise Learning Rate Decay factor
                               # Shallower layers get progressively lower LR
@@ -49,10 +49,10 @@ training:
   
   # Learning Rate Scheduler
   scheduler:
-    name: "constant"              # cosine, sgdr (or cosine_restarts), step, polynomial, exponential
+    name: "cosine"              # cosine, sgdr (or cosine_restarts), step, polynomial, exponential
     warmup_epochs: 0          # Linear warmup epochs (5-10 typical)
     warmup_start_factor: 1.0e-6  # Initial LR factor during warmup (used by cosine/sgdr)
-    min_lr: 1.0e-4            # Minimum learning rate for cosine annealing
+    min_lr: 1.0e-6            # Minimum learning rate for cosine annealing
                               # For sgdr/cosine_restarts, restarts happen automatically at training.image_size epoch milestones
     restart_lr_decay: 0.9     # SGDR only: multiply peak LR by this factor at each restart (e.g., 0.8 => lower peak each cycle)
     # Step scheduler parameters (if using step)
@@ -62,11 +62,9 @@ training:
 # Distillation Configuration
 distillation:
   losses:                     # List of loss configurations with weights
-    - type: "msw"             # Example of adding a second loss with lower weight
-      weight: 0.3
-    - type: "cosine"
-      weight: 0.7
-  temperature: 4.0            # Temperature for KL divergence (not used for cosine)
+    - type: "exp_cosine"             # Example of adding a second loss with lower wei
+      weight: 1.0
+      temperature: 0.07            # Temperature for KL divergence (not used for cosine)
   # Feature loss weighting
   feature_weight: 1.0         # Overall weight for feature matching loss
   stage_loss_weights: null      # Weights for each feature stage
@@ -129,8 +127,8 @@ data:
       threshold: 128           # Solarize threshold for PIL images
   
   # Optional: limit datasets for testing (null = use all data)
-  train_limit: 300            # Limit training images for quick testing
-  val_limit: 70              # Limit validation images for quick testing
+  #train_limit: 300            # Limit training images for quick testing
+  #val_limit: 70              # Limit validation images for quick testing
 
 # Evaluation Configuration
 evaluation:

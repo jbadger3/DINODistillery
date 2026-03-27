@@ -3,16 +3,16 @@ student:
   model: "repvit_m1_1"  # Model architecture see student registry files for options
   pretrained: true         # Use pretrained weights
   adapter_type: "basic"
-  out_feature_indexes: [3]  # List of layer indexes to extract features from
+  out_feature_indexes: [0, 1, 2, 3]  # List of layer indexes to extract features from
 teacher:
   model: "vit_base"  # Model architecture from backbone_registry.py
-  out_feature_indexes: [11]  # List of layer indexes to extract features from
+  out_feature_indexes: [2, 5, 8, 11]  # List of layer indexes to extract features from
 
 # Training Configuration
 training:
   max_epochs: 12             # Feature distillation: 50-150 epochs (typically faster than KD-only)
-  batch_size: 40             # Adjust based on GPU memory (64-256 typical)
-  accumulate_grad_batches: 6  # Number of batches to accumulate gradients before optimizer step
+  batch_size: 30             # Adjust based on GPU memory (64-256 typical)
+  accumulate_grad_batches: 8  # Number of batches to accumulate gradients before optimizer step
                               # Effective batch size = batch_size * accumulate_grad_batches
                               # Use higher values (2, 4, 8) to simulate larger batches with limited GPU memory
   
@@ -62,9 +62,8 @@ training:
 # Distillation Configuration
 distillation:
   losses:                     # List of loss configurations with weights
-    - type: "exp_cosine"             # Example of adding a second loss with lower weight
-      weight: 1.0
-      temperature: 0.07           
+    - type: "mse"             # Example of adding a second loss with lower weight
+      weight: 1.0           
   # Feature loss weighting
   feature_weight: 1.0         # Overall weight for feature matching loss
   stage_loss_weights: null      # Weights for each feature stage
