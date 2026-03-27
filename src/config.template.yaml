@@ -46,6 +46,7 @@ training:
 
 # Distillation Configuration
 distillation:
+  feature_interpolate_mode: "bilinear"  # Spatial resize for teacher features: bilinear or nearest
   loss_type: "cosine"         # cosine (recommended for DINOv2), exp_cosine, mse, cosine_global, kl_div
   temperature: 4.0            # Temperature for KL divergence (not used for cosine)
   alpha: 0.5                  # Weight between distillation and task loss

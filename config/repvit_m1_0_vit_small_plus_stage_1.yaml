@@ -1,6 +1,6 @@
 # Teacher and Student Configurations
 student:
-  model: "repvit_m1"  # Model architecture see student registry files for options
+  model: "repvit_m1_0"  # Model architecture see student registry files for options
   pretrained: true         # Use pretrained weights
   adapter_type: "basic"
   out_feature_indexes: [0, 1, 2, 3]  # List of layer indexes to extract features from
@@ -10,7 +10,7 @@ teacher:
 
 # Training Configuration
 training:
-  max_epochs: 400             # Feature distillation: 50-150 epochs (typically faster than KD-only)
+  max_epochs: 70             # Feature distillation: 50-150 epochs (typically faster than KD-only)
   batch_size: 40             # Adjust based on GPU memory (64-256 typical)
   accumulate_grad_batches: 6  # Number of batches to accumulate gradients before optimizer step
                               # Effective batch size = batch_size * accumulate_grad_batches
@@ -49,10 +49,10 @@ training:
   
   # Learning Rate Scheduler
   scheduler:
-    name: "constant"              # cosine, sgdr (or cosine_restarts), step, polynomial, exponential
+    name: "cosine"              # cosine, sgdr (or cosine_restarts), step, polynomial, exponential
     warmup_epochs: 5          # Linear warmup epochs (5-10 typical)
     warmup_start_factor: 1.0e-6  # Initial LR factor during warmup (used by cosine/sgdr)
-    min_lr: 1.0e-4            # Minimum learning rate for cosine annealing
+    min_lr: 1.0e-6            # Minimum learning rate for cosine annealing
                               # For sgdr/cosine_restarts, restarts happen automatically at training.image_size epoch milestones
     restart_lr_decay: 0.9     # SGDR only: multiply peak LR by this factor at each restart (e.g., 0.8 => lower peak each cycle)
     # Step scheduler parameters (if using step)
@@ -61,7 +61,7 @@ training:
 
 # Distillation Configuration
 distillation:
-  feature_interpolate_mode: "bilinear"
+  feature_interpolate_mode: "nearest"
   losses:                     # List of loss configurations with weights
     - type: "mse"             # Example of adding a second loss with lower weight
       weight: 1.0
@@ -133,7 +133,7 @@ data:
 
 # Evaluation Configuration
 evaluation:
-  eval_every_n_epochs: 10       # Run validation every N epochs
+  eval_every_n_epochs: 5       # Run validation every N epochs
 
 # Early Stopping Configuration
 early_stopping:
@@ -146,7 +146,7 @@ early_stopping:
 
 # Logging Configuration
 logging:
-  experiment_name: "repvit_m1_vit_small_plus_stage_1"
+  experiment_name: "repvit_m1_0_vit_small_plus_stage_1"
                               # Structure: outputs/{experiment_name}/
                               #   - checkpoints/  (model checkpoints)
                               #   - logs/         (tensorboard logs)

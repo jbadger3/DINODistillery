@@ -343,6 +343,9 @@ class DistillationLightningModule(L.LightningModule):
         
         # Distillation config
         self.temperature = config['distillation'].get('temperature', 4.0)
+        self.feature_interpolate_mode = str(
+            config['distillation'].get('feature_interpolate_mode', 'bilinear')
+        )
         
         # Parse loss configuration - support both single and multi-loss
         self.loss_configs = self._parse_loss_config(config['distillation'])
@@ -422,8 +425,7 @@ class DistillationLightningModule(L.LightningModule):
 
         for feat_list_idx, (s_feat, t_feat) in enumerate(zip(student_features, teacher_features)):
             #Match spatial size for side-by-side visualization consistency.
-            if s_feat.shape[2:] != t_feat.shape[2:]:
-                t_feat = F.interpolate(t_feat, size=s_feat.shape[2:], mode='bilinear', align_corners=False)
+            t_feat = self._resize_teacher_to_student_spatial(t_feat, s_feat)
             student_rgb_maps, teacher_rgb_maps = rgb_pca_maps_for_features(s_feat, t_feat)
             student_rgb_maps = student_rgb_maps.detach().cpu()
             teacher_rgb_maps = teacher_rgb_maps.detach().cpu()
@@ -492,6 +494,25 @@ class DistillationLightningModule(L.LightningModule):
                 'temperature': temperature,
             })
         return normalized_losses
+
+    def _resize_teacher_to_student_spatial(self, teacher_feat: torch.Tensor, student_feat: torch.Tensor) -> torch.Tensor:
+        """Resize teacher feature map to match student spatial dimensions."""
+        if teacher_feat.shape[2:] == student_feat.shape[2:]:
+            return teacher_feat
+
+        if self.feature_interpolate_mode == 'nearest':
+            return F.interpolate(
+                teacher_feat,
+                size=student_feat.shape[2:],
+                mode='nearest',
+            )
+
+        return F.interpolate(
+            teacher_feat,
+            size=student_feat.shape[2:],
+            mode='bilinear',
+            align_corners=False,
+        )
     
     def _parse_image_size_config(self, image_size_config):
         """Parse image size configuration into a schedule.
@@ -683,8 +704,7 @@ class DistillationLightningModule(L.LightningModule):
             Loss value
         """
         #First resize the teacher spatial dimension to match the student if needed
-        if s_feat.shape[2:] != t_feat.shape[2:]:
-            t_feat = F.interpolate(t_feat, size=s_feat.shape[2:], mode='bilinear', align_corners=False)
+        t_feat = self._resize_teacher_to_student_spatial(t_feat, s_feat)
 
         loss_type = loss_cfg['type']
         temperature = float(loss_cfg.get('temperature', 1.0))
@@ -816,8 +836,7 @@ class DistillationLightningModule(L.LightningModule):
         if gram_active and self.gram_loss_fn is not None and self.gram_loss_weight > 0:
             gram_loss = 0.0
             for s_feat, t_feat in zip(student_features, teacher_features):
-                if s_feat.shape[2:] != t_feat.shape[2:]:
-                    t_feat = F.interpolate(t_feat, size=s_feat.shape[2:], mode='bilinear', align_corners=False)
+                t_feat = self._resize_teacher_to_student_spatial(t_feat, s_feat)
                 s_for_gram = self._prepare_gram_features(s_feat)
                 t_for_gram = self._prepare_gram_features(t_feat)
                 gram_loss = gram_loss + self.gram_loss_fn(
