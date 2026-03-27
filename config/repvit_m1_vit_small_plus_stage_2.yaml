@@ -61,6 +61,7 @@ training:
 
 # Distillation Configuration
 distillation:
+  feature_interpolate_mode: "bilinear"
   losses:                     # List of loss configurations with weights
     - type: "msw"             # Example of adding a second loss with lower weight
       weight: 0.3
