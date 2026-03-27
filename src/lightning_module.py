@@ -342,23 +342,51 @@ class DistillationLightningModule(L.LightningModule):
         self.student_feature_indexes = config['student'].get('out_feature_indexes', [])
         
         # Distillation config
-        self.temperature = config['distillation'].get('temperature', 4.0)
+        distillation_cfg = config['distillation']
+        self.temperature = distillation_cfg.get('temperature', 4.0)
+
+        spatial_matching_cfg = distillation_cfg.get('spatial_matching_mode', {})
+        if not isinstance(spatial_matching_cfg, dict):
+            raise ValueError(
+                "distillation.spatial_matching_mode must be a dict with keys "
+                "'name' and 'feature_interpolate_mode'"
+            )
+
+        self.spatial_matching_mode = str(
+            spatial_matching_cfg.get('name', 'parent2student')
+        ).lower()
         self.feature_interpolate_mode = str(
-            config['distillation'].get('feature_interpolate_mode', 'bilinear')
-        )
+            spatial_matching_cfg.get('feature_interpolate_mode', 'bilinear')
+        ).lower()
+
+        valid_spatial_matching_modes = {'parent2student', 'student2parent'}
+        if self.spatial_matching_mode not in valid_spatial_matching_modes:
+            raise ValueError(
+                "Unknown distillation.spatial_matching_mode.name: "
+                f"{self.spatial_matching_mode}. "
+                f"Expected one of {sorted(valid_spatial_matching_modes)}"
+            )
+
+        valid_interpolate_modes = {'bilinear', 'nearest'}
+        if self.feature_interpolate_mode not in valid_interpolate_modes:
+            raise ValueError(
+                "Unknown distillation.spatial_matching_mode.feature_interpolate_mode: "
+                f"{self.feature_interpolate_mode}. "
+                f"Expected one of {sorted(valid_interpolate_modes)}"
+            )
         
         # Parse loss configuration - support both single and multi-loss
-        self.loss_configs = self._parse_loss_config(config['distillation'])
+        self.loss_configs = self._parse_loss_config(distillation_cfg)
         
         # Stage loss weights (optional)
-        stage_loss_weights = config['distillation'].get('stage_loss_weights', None)
+        stage_loss_weights = distillation_cfg.get('stage_loss_weights', None)
         if stage_loss_weights and len(stage_loss_weights) > 0:
             self.stage_loss_weights = torch.tensor(stage_loss_weights, dtype=torch.float32)
         else:
             self.stage_loss_weights = None
 
         # Optional Gram loss configuration
-        self.gram_loss_config = self._parse_gram_loss_config(config['distillation'])
+        self.gram_loss_config = self._parse_gram_loss_config(distillation_cfg)
         self.gram_loss_enabled = self.gram_loss_config['enabled']
         self.gram_loss_weight = self.gram_loss_config['weight']
         self.gram_loss_img_level = self.gram_loss_config['img_level']
@@ -424,8 +452,8 @@ class DistillationLightningModule(L.LightningModule):
         feature_indices = self.student_feature_indexes if self.student_feature_indexes else list(range(len(student_features)))
 
         for feat_list_idx, (s_feat, t_feat) in enumerate(zip(student_features, teacher_features)):
-            #Match spatial size for side-by-side visualization consistency.
-            t_feat = self._resize_teacher_to_student_spatial(t_feat, s_feat)
+            # Match spatial size for side-by-side visualization consistency.
+            s_feat, t_feat = self._match_feature_spatial_shapes(s_feat, t_feat)
             student_rgb_maps, teacher_rgb_maps = rgb_pca_maps_for_features(s_feat, t_feat)
             student_rgb_maps = student_rgb_maps.detach().cpu()
             teacher_rgb_maps = teacher_rgb_maps.detach().cpu()
@@ -513,7 +541,51 @@ class DistillationLightningModule(L.LightningModule):
             mode='bilinear',
             align_corners=False,
         )
+
+    def _resize_student_to_teacher(self, student_feat: torch.Tensor, teacher_feat: torch.Tensor) -> torch.Tensor:
+        """Resize student feature map to match teacher spatial dimensions using average pooling."""
+        if student_feat.shape[2:] == teacher_feat.shape[2:]:
+            return student_feat
+
+        s_h, s_w = student_feat.shape[2], student_feat.shape[3]
+        t_h, t_w = teacher_feat.shape[2], teacher_feat.shape[3]
+
+        # Average pooling only downsamples. Use adaptive pooling for exact target size.
+        if t_h > s_h or t_w > s_w:
+            raise ValueError(
+                "Cannot upsample student features with average pooling: "
+                f"student={student_feat.shape[2:]}, teacher={teacher_feat.shape[2:]}"
+            )
+
+        if s_h % t_h == 0 and s_w % t_w == 0:
+            kernel_h = s_h // t_h
+            kernel_w = s_w // t_w
+            return F.avg_pool2d(
+                student_feat,
+                kernel_size=(kernel_h, kernel_w),
+                stride=(kernel_h, kernel_w),
+            )
+
+        return F.adaptive_avg_pool2d(student_feat, output_size=teacher_feat.shape[2:])
+
+    def _match_feature_spatial_shapes(
+        self,
+        student_feat: torch.Tensor,
+        teacher_feat: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return student/teacher features with aligned spatial shape per configured matching mode."""
+        if self.spatial_matching_mode == 'parent2student':
+            teacher_feat = self._resize_teacher_to_student_spatial(teacher_feat, student_feat)
+            return student_feat, teacher_feat
+
+        if self.spatial_matching_mode == 'student2parent':
+            student_feat = self._resize_student_to_teacher(student_feat, teacher_feat)
+            return student_feat, teacher_feat
+
+        raise ValueError(f"Unsupported spatial matching mode: {self.spatial_matching_mode}")
     
+    
+
     def _parse_image_size_config(self, image_size_config):
         """Parse image size configuration into a schedule.
         
@@ -703,8 +775,8 @@ class DistillationLightningModule(L.LightningModule):
         Returns:
             Loss value
         """
-        #First resize the teacher spatial dimension to match the student if needed
-        t_feat = self._resize_teacher_to_student_spatial(t_feat, s_feat)
+        # Match spatial dimensions according to configured matching mode.
+        s_feat, t_feat = self._match_feature_spatial_shapes(s_feat, t_feat)
 
         loss_type = loss_cfg['type']
         temperature = float(loss_cfg.get('temperature', 1.0))
@@ -836,7 +908,7 @@ class DistillationLightningModule(L.LightningModule):
         if gram_active and self.gram_loss_fn is not None and self.gram_loss_weight > 0:
             gram_loss = 0.0
             for s_feat, t_feat in zip(student_features, teacher_features):
-                t_feat = self._resize_teacher_to_student_spatial(t_feat, s_feat)
+                s_feat, t_feat = self._match_feature_spatial_shapes(s_feat, t_feat)
                 s_for_gram = self._prepare_gram_features(s_feat)
                 t_for_gram = self._prepare_gram_features(t_feat)
                 gram_loss = gram_loss + self.gram_loss_fn(

@@ -61,7 +61,9 @@ training:
 
 # Distillation Configuration
 distillation:
-  feature_interpolate_mode: "bilinear"
+  spatial_matching_mode:
+    name: "parent2student"
+    feature_interpolate_mode: "bilinear"
   losses:                     # List of loss configurations with weights
     - type: "exp_cosine"             # Example of adding a second loss with lower wei
       weight: 1.0
