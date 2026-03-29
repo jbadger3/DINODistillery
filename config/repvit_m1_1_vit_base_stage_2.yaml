@@ -10,7 +10,7 @@ teacher:
 
 # Training Configuration
 training:
-  max_epochs: 12             # Feature distillation: 50-150 epochs (typically faster than KD-only)
+  max_epochs: 40             # Feature distillation: 50-150 epochs (typically faster than KD-only)
   batch_size: 30             # Adjust based on GPU memory (64-256 typical)
   accumulate_grad_batches: 8  # Number of batches to accumulate gradients before optimizer step
                               # Effective batch size = batch_size * accumulate_grad_batches
@@ -20,6 +20,7 @@ training:
   # Option 1: Single size (fixed throughout training)
   image_size:
     0: 512
+    29: 768
 
 
   # Option 2: Progressive sizes - map epoch numbers to image sizes
@@ -39,7 +40,7 @@ training:
   # Optimizer Configuration
   optimizer:
     name: "adamw"             # adamw, adam, sgd
-    lr: 0.00001                # Base learning rate
+    lr: 0.00005                # Base learning rate
     weight_decay: 0.005        # AdamW typically uses higher weight decay (0.01-0.1)
     momentum: 0.9             # For SGD
     llrd_decay: 0.98          # Layer-wise Learning Rate Decay factor
@@ -50,7 +51,7 @@ training:
   # Learning Rate Scheduler
   scheduler:
     name: "cosine"              # cosine, sgdr (or cosine_restarts), step, polynomial, exponential
-    warmup_epochs: 1          # Linear warmup epochs (5-10 typical)
+    warmup_epochs: 0          # Linear warmup epochs (5-10 typical)
     warmup_start_factor: 1.0e-7  # Initial LR factor during warmup (used by cosine/sgdr)
     min_lr: 1.0e-7            # Minimum learning rate for cosine annealing
                               # For sgdr/cosine_restarts, restarts happen automatically at training.image_size epoch milestones
@@ -62,7 +63,7 @@ training:
 # Distillation Configuration
 distillation:
   spatial_matching_mode:
-    name: "teacher2student"
+    name: "student2teacher"
     feature_interpolate_mode: "bilinear"
   losses:                     # List of loss configurations with weights
     - type: "mse"             # Example of adding a second loss with lower weight
