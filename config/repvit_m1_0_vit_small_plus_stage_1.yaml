@@ -10,9 +10,9 @@ teacher:
 
 # Training Configuration
 training:
-  max_epochs: 70             # Feature distillation: 50-150 epochs (typically faster than KD-only)
-  batch_size: 40             # Adjust based on GPU memory (64-256 typical)
-  accumulate_grad_batches: 6  # Number of batches to accumulate gradients before optimizer step
+  max_epochs: 60             # Feature distillation: 50-150 epochs (typically faster than KD-only)
+  batch_size: 30             # Adjust based on GPU memory (64-256 typical)
+  accumulate_grad_batches: 8  # Number of batches to accumulate gradients before optimizer step
                               # Effective batch size = batch_size * accumulate_grad_batches
                               # Use higher values (2, 4, 8) to simulate larger batches with limited GPU memory
   
@@ -20,6 +20,7 @@ training:
   # Option 1: Single size (fixed throughout training)
   image_size:
     0: 256
+    49: 512
 
 
   # Option 2: Progressive sizes - map epoch numbers to image sizes

@@ -11,8 +11,8 @@ teacher:
 # Training Configuration
 training:
   max_epochs: 75             # Feature distillation: 50-150 epochs (typically faster than KD-only)
-  batch_size: 40             # Adjust based on GPU memory (64-256 typical)
-  accumulate_grad_batches: 6  # Number of batches to accumulate gradients before optimizer step
+  batch_size: 30             # Adjust based on GPU memory (64-256 typical)
+  accumulate_grad_batches: 8  # Number of batches to accumulate gradients before optimizer step
                               # Effective batch size = batch_size * accumulate_grad_batches
                               # Use higher values (2, 4, 8) to simulate larger batches with limited GPU memory
   
@@ -20,6 +20,7 @@ training:
   # Option 1: Single size (fixed throughout training)
   image_size:
     0: 256
+    59: 512
 
 
   # Option 2: Progressive sizes - map epoch numbers to image sizes
@@ -62,8 +63,7 @@ training:
 # Distillation Configuration
 distillation:
   spatial_matching_mode:
-    name: "teacher2student"
-    feature_interpolate_mode: "bilinear"
+    name: "student2teacher"
   losses:                     # List of loss configurations with weights
     - type: "mse"             # Example of adding a second loss with lower weight
       weight: 1.0
@@ -135,7 +135,7 @@ data:
 
 # Evaluation Configuration
 evaluation:
-  eval_every_n_epochs: 10       # Run validation every N epochs
+  eval_every_n_epochs: 5       # Run validation every N epochs
 
 # Early Stopping Configuration
 early_stopping:
