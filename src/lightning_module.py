@@ -545,6 +545,7 @@ class DistillationLightningModule(L.LightningModule):
                 'weight': loss['weight'] / total_weight,
                 'temperature': temperature,
                 'temperature_schedule': temperature_schedule,
+                'ignore_border': bool(loss.get('ignore_border', False)),
             })
         return normalized_losses
 
@@ -621,6 +622,17 @@ class DistillationLightningModule(L.LightningModule):
             return student_feat, teacher_feat
 
         raise ValueError(f"Unsupported spatial matching mode: {self.spatial_matching_mode}")
+
+    def _apply_loss_border_crop(self, feat: torch.Tensor) -> torch.Tensor:
+        """Optionally crop a 1-pixel border for loss computation on [B, C, H, W] tensors."""
+        if feat.ndim != 4:
+            return feat
+
+        if feat.shape[2] <= 2 or feat.shape[3] <= 2:
+            # No interior spatial region remains after border removal.
+            return feat
+
+        return feat[:, :, 1:-1, 1:-1]
     
     
 
@@ -815,6 +827,10 @@ class DistillationLightningModule(L.LightningModule):
         """
         # Match spatial dimensions according to configured matching mode.
         s_feat, t_feat = self._match_feature_spatial_shapes(s_feat, t_feat)
+        ignore_border = bool(loss_cfg.get('ignore_border', False))
+        if ignore_border:
+            s_feat = self._apply_loss_border_crop(s_feat)
+            t_feat = self._apply_loss_border_crop(t_feat)
 
         loss_type = loss_cfg['type']
         temperature = self._get_loss_temperature(loss_cfg, self.current_epoch)

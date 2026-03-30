@@ -53,6 +53,7 @@ distillation:
     - type: "cosine"         # cosine (recommended for DINOv2), exp_cosine, mse, cosine_global, kl_div
       weight: 1.0
       temperature: 1.0        # Used by cosine/cosine_global/exp_cosine; must be > 0
+      ignore_border: false    # If true, ignore 1-pixel border (use [:, :, 1:-1, 1:-1]) for this loss
       # Optional for exp_cosine only: milestone-based temperature annealing
       # Use the latest key <= current epoch
       # temperature_schedule:
