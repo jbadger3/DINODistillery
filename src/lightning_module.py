@@ -516,14 +516,52 @@ class DistillationLightningModule(L.LightningModule):
                 raise ValueError(
                     f"distillation.losses[{loss.get('type', 'unknown')}].temperature must be > 0"
                 )
+
+            temperature_schedule = None
+            if loss['type'] == 'exp_cosine':
+                temperature_schedule = loss.get('temperature_schedule')
+                if temperature_schedule is not None:
+                    if not isinstance(temperature_schedule, dict):
+                        raise ValueError(
+                            "distillation.losses[exp_cosine].temperature_schedule must be a dict "
+                            "mapping epoch -> temperature"
+                        )
+
+                    temperature_schedule = {
+                        int(epoch): float(schedule_temperature)
+                        for epoch, schedule_temperature in temperature_schedule.items()
+                    }
+                    temperature_schedule = dict(sorted(temperature_schedule.items()))
+
+                    for epoch, schedule_temperature in temperature_schedule.items():
+                        if schedule_temperature <= 0:
+                            raise ValueError(
+                                "distillation.losses[exp_cosine].temperature_schedule values "
+                                f"must be > 0, got {schedule_temperature} at epoch {epoch}"
+                            )
+
             normalized_losses.append({
                 'type': loss['type'],
                 'weight': loss['weight'] / total_weight,
                 'temperature': temperature,
+                'temperature_schedule': temperature_schedule,
             })
         return normalized_losses
 
-    def _resize_teacher_to_student_spatial(self, teacher_feat: torch.Tensor, student_feat: torch.Tensor) -> torch.Tensor:
+    def _get_loss_temperature(self, loss_cfg: Dict[str, Any], epoch: int) -> float:
+        """Resolve the active loss temperature, supporting optional epoch schedules."""
+        temperature_schedule = loss_cfg.get('temperature_schedule')
+        if not temperature_schedule:
+            return float(loss_cfg.get('temperature', 1.0))
+
+        applicable_epochs = [scheduled_epoch for scheduled_epoch in temperature_schedule.keys() if scheduled_epoch <= epoch]
+        if not applicable_epochs:
+            return float(loss_cfg.get('temperature', 1.0))
+
+        epoch_key = max(applicable_epochs)
+        return float(temperature_schedule[epoch_key])
+
+    def _resize_teacher_to_student(self, teacher_feat: torch.Tensor, student_feat: torch.Tensor) -> torch.Tensor:
         """Resize teacher feature map to match student spatial dimensions."""
         if teacher_feat.shape[2:] == student_feat.shape[2:]:
             return teacher_feat
@@ -575,7 +613,7 @@ class DistillationLightningModule(L.LightningModule):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return student/teacher features with aligned spatial shape per configured matching mode."""
         if self.spatial_matching_mode == 'teacher2student':
-            teacher_feat = self._resize_teacher_to_student_spatial(teacher_feat, student_feat)
+            teacher_feat = self._resize_teacher_to_student(teacher_feat, student_feat)
             return student_feat, teacher_feat
 
         if self.spatial_matching_mode == 'student2teacher':
@@ -779,7 +817,7 @@ class DistillationLightningModule(L.LightningModule):
         s_feat, t_feat = self._match_feature_spatial_shapes(s_feat, t_feat)
 
         loss_type = loss_cfg['type']
-        temperature = float(loss_cfg.get('temperature', 1.0))
+        temperature = self._get_loss_temperature(loss_cfg, self.current_epoch)
 
         if loss_type == 'mse':
             s_norm = F.normalize(s_feat, p=2, dim=1, eps=1e-6)

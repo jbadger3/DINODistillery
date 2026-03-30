@@ -49,7 +49,16 @@ distillation:
   spatial_matching_mode:
     name: 'teacher2student'  # teacher2student, student2teacher, nearest_neighbor
     feature_interpolate_mode: "bilinear"  # Spatial resize for teacher features: bilinear or nearest
-  loss_type: "cosine"         # cosine (recommended for DINOv2), exp_cosine, mse, cosine_global, kl_div
+  losses:                     # List of loss configurations with weights
+    - type: "cosine"         # cosine (recommended for DINOv2), exp_cosine, mse, cosine_global, kl_div
+      weight: 1.0
+      temperature: 1.0        # Used by cosine/cosine_global/exp_cosine; must be > 0
+      # Optional for exp_cosine only: milestone-based temperature annealing
+      # Use the latest key <= current epoch
+      # temperature_schedule:
+      #   0: 0.25
+      #   50: 0.5
+      #   80: 1.0
   temperature: 4.0            # Temperature for KL divergence (not used for cosine)
   alpha: 0.5                  # Weight between distillation and task loss
                               # For pure feature distillation: 1.0
